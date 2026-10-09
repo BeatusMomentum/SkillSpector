@@ -179,6 +179,15 @@ def _normalize_component_path(path: str) -> str:
     return posixpath.normpath(normalized)
 
 
+def source_content_key(source_scope: str, file_path: str) -> str:
+    """Keep internal source content keys outside the filesystem path namespace.
+
+    NUL cannot occur in a real path. JSON binds the scope and exact path without
+    ambiguous delimiters; display/coverage paths remain ordinary strings.
+    """
+    return "\0" + json.dumps([source_scope, file_path], ensure_ascii=False, separators=(",", ":"))
+
+
 def _component_content(
     file_cache: Mapping[str, str],
     file_path: str,
@@ -189,15 +198,9 @@ def _component_content(
     """Look up *file_path* without crossing source-scope boundaries."""
     source_scope = source_identity or source_url
     if source_scope:
-        normalized_path = _normalize_component_path(file_path)
-        scoped_candidates = (
-            f"{source_scope}::{file_path}",
-            f"{source_scope}::{normalized_path}",
-            f"{source_scope.rstrip('/')}/{normalized_path}",
-        )
-        for source_key in scoped_candidates:
-            if source_key in file_cache:
-                return file_cache[source_key]
+        source_key = source_content_key(source_scope, file_path)
+        if source_key in file_cache:
+            return file_cache[source_key]
         # A transitive finding must never borrow a same-named root or sibling
         # component when its own immutable source cache entry is unavailable.
         return None
@@ -205,6 +208,8 @@ def _component_content(
         return file_cache[file_path]
     normalized = _normalize_component_path(file_path)
     for candidate, content in file_cache.items():
+        if candidate.startswith("\0"):
+            continue
         if _normalize_component_path(candidate) == normalized:
             return content
     return None
