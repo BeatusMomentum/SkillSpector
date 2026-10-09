@@ -41,13 +41,18 @@ from skillspector.dependency_sources import redact_text
 from skillspector.inference_usage import sanitize_inference_usage
 from skillspector.inspection_ledger import (
     MAX_FINDING_OUTPUT_RECORDS,
+    RULE_SET_SCOPE,
     AnalysisCompleteness,
     finalize_ledger,
 )
 from skillspector.llm_provenance import sanitize_llm_provenance
 from skillspector.llm_utils import is_llm_available
 from skillspector.logging_config import get_logger
-from skillspector.models import Finding
+from skillspector.models import (
+    OCCURRENCE_CODE_SNIPPET_KEY,
+    OCCURRENCE_FINDING_ID_KEY,
+    Finding,
+)
 from skillspector.nodes.analyzers import ANALYZER_MODULES
 from skillspector.nodes.deduplicate import deduplicate
 from skillspector.python_ast import clear_python_ast_cache
@@ -143,6 +148,13 @@ def _sanitize_finding(finding: Finding) -> Finding:
     evidence = {
         clean(str(key)) or "": clean_evidence(value) for key, value in finding.evidence.items()
     }
+    occurrences = []
+    for raw in finding.occurrences:
+        occurrence = dict(raw)
+        report_snippet = occurrence.get(OCCURRENCE_CODE_SNIPPET_KEY)
+        if isinstance(report_snippet, str):
+            occurrence[OCCURRENCE_CODE_SNIPPET_KEY] = clean(report_snippet)
+        occurrences.append(occurrence)
     return replace(
         finding,
         message=clean(finding.message) or "",
@@ -154,6 +166,23 @@ def _sanitize_finding(finding: Finding) -> Finding:
         matched_text=clean(finding.matched_text),
         code_snippet=clean(finding.code_snippet),
         evidence=evidence,
+        occurrences=occurrences,
+    )
+
+
+def _finding_for_occurrence(finding: Finding, occurrence: Mapping[str, object]) -> Finding:
+    """Return report-only metadata bound to one compacted occurrence."""
+    finding_id = occurrence.get(OCCURRENCE_FINDING_ID_KEY)
+    snippet = occurrence.get(OCCURRENCE_CODE_SNIPPET_KEY)
+    if not isinstance(finding_id, str) or not finding_id:
+        finding_id = finding.finding_id
+    if OCCURRENCE_CODE_SNIPPET_KEY not in occurrence:
+        return replace(finding, finding_id=finding_id)
+    return replace(
+        finding,
+        finding_id=finding_id,
+        code_snippet=snippet if isinstance(snippet, str) else None,
+        context=None,
     )
 
 
@@ -247,6 +276,7 @@ def _expand_occurrences(findings: list[Finding]) -> list[Finding]:
             }
         ]
         for occurrence in occurrences:
+            occurrence_finding = _finding_for_occurrence(finding, occurrence)
             start_value = occurrence.get("start_line", finding.start_line)
             start_line = start_value if isinstance(start_value, int) else finding.start_line
             end_value = occurrence.get("end_line")
@@ -256,7 +286,7 @@ def _expand_occurrences(findings: list[Finding]) -> list[Finding]:
             depth_value = provenance.get("transitive_depth")
             expanded.append(
                 replace(
-                    finding,
+                    occurrence_finding,
                     file=str(occurrence.get("file", finding.file)),
                     start_line=start_line,
                     end_line=end_line,
@@ -343,9 +373,10 @@ def _build_sarif_properties(
     finding: Finding, occurrence: Mapping[str, object] | None = None
 ) -> dict[str, object] | None:
     """Project selected finding metadata into a SARIF properties dictionary."""
-    finding_dict = finding.to_dict()
+    occurrence_finding = _finding_for_occurrence(finding, occurrence or {})
+    finding_dict = occurrence_finding.to_dict()
     metadata: dict[str, object] = {
-        "findingId": finding.finding_id,
+        "findingId": occurrence_finding.finding_id,
         "severity": finding_dict["severity"],
         # GitHub code scanning banding: emitted alongside level so generic
         # SARIF consumers can distinguish CRITICAL from HIGH.
@@ -842,8 +873,11 @@ def _build_sarif(
         path = str(exception.get("path", ""))
         start_line = exception.get("start_line")
         end_line = exception.get("end_line")
+        scope = exception.get("scope")
         locations = None
-        if path:
+        # A rule-set row's path is a label, not an artifact; giving it a
+        # physical location would attribute it to any real file of that name.
+        if path and not scope:
             region = (
                 SarifRegion(
                     startLine=int(start_line),
@@ -867,6 +901,8 @@ def _build_sarif(
         }
         if exception.get("fatal") is not None:
             properties["fatal"] = bool(exception["fatal"])
+        if scope:
+            properties["scope"] = str(scope)
         analyzers = exception.get("analyzers")
         if isinstance(analyzers, list):
             properties["analyzers"] = list(analyzers)
@@ -1003,6 +1039,9 @@ def _render_terminal_completeness(
             end_line = row.get("end_line")
             if isinstance(start_line, int):
                 location += f":{start_line}" + (f"-{end_line}" if end_line else "")
+            if row.get("scope") == RULE_SET_SCOPE:
+                # The path of a rule-set row is a label, not an artifact.
+                location = f"rule set {location}"
             reason = str(row.get("reason_code", row.get("status", "status")))
             message = str(row.get("message", ""))
             console.print(f"  - {escape(reason)} {escape(location)}: {escape(message)}")
@@ -1477,8 +1516,12 @@ def _render_markdown_completeness(
             if isinstance(start_line, int):
                 location += f":{start_line}" + (f"-{end_line}" if end_line else "")
             reason = row.get("reason_code", row.get("status", "status"))
+            location_cell = _markdown_code(location, table_cell=True)
+            if row.get("scope") == RULE_SET_SCOPE:
+                # The path of a rule-set row is a label, not an artifact.
+                location_cell = f"rule set {location_cell}"
             lines.append(
-                f"| {_markdown_cell(reason)} | {_markdown_code(location, table_cell=True)} | "
+                f"| {_markdown_cell(reason)} | {location_cell} | "
                 f"{_markdown_cell(row.get('message', ''))} |"
             )
         lines.append("")
