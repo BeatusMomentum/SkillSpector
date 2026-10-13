@@ -111,6 +111,9 @@ _P6_QUALIFIED_TARGET = re.compile(
 _IDENTIFIER_CONTINUATION = regex.compile(r"[\p{ID_Continue}$\u200c\u200d]")
 _MARKER_BOUNDARY_CACHE_CORE_CHARS = 8192
 _MARKER_BOUNDARY_CACHE_ENTRIES = 4
+_MAX_EMPHASIS_CONTEXT_CHARS = 4096
+_MARKDOWN_BLANK_LINE = re.compile(r"(?:\r\n|\r(?!\n)|\n)[ \t]*(?:\r\n|\r(?!\n)|\n)")
+_MARKDOWN_EMPHASIS_PREFIX = re.compile(r"please[ \t]+\Z", re.IGNORECASE)
 
 # P7: Indirect Prompt Extraction — side-channel or inference-based extraction
 P7_PATTERNS = [
@@ -620,6 +623,7 @@ class _PreparedAnalysis:
     heading_spans: Mapping[int, int]
     source: str
     check_runtime: Callable[[], None]
+    markdown: bool
     _marker_boundary_cache: OrderedDict[
         int, tuple[int, tuple[tuple[SecurityTextView, SecurityTextView], ...]]
     ] = field(default_factory=OrderedDict, init=False, repr=False, compare=False)
@@ -726,6 +730,70 @@ class _PreparedAnalysis:
                 retained_suffix = suffix_state
         return retained_suffix
 
+    def _target_closes_markdown_emphasis(
+        self, match: re.Match[str], view: SecurityTextView
+    ) -> bool:
+        """Recognize a bounded balanced underscore wrapper in the original source.
+
+        The opener must immediately precede the request, optionally with "please".
+        This cannot borrow an underscore from a preceding statement or identifier.
+        More complex Markdown remains subject to the normal identifier check.
+        """
+        if not self.markdown:
+            return False
+        self.check_runtime()
+        end = match.end()
+        if end == len(view.text):
+            projected = normalized_security_view(self.source[view.source_offset(end - 1)]).text
+            if not projected.casefold().endswith(view.text[end - 1].casefold()):
+                return False
+        close = view.source_offset(end) if end < len(view.text) else view.source_offset(end - 1) + 1
+        if close >= len(self.source) or self.source[close] != "_":
+            return False
+        close_end = close
+        while close_end < len(self.source) and self.source[close_end] == "_":
+            close_end += 1
+            if close_end - close > 3:
+                return False
+        if close_end < len(self.source):
+            following = self.source[close_end]
+            if not (following.isspace() or unicodedata.category(following)[0] in {"P", "S"}):
+                return False
+            if _is_identifier_continuation(self._source_suffix_character(close_end)):
+                return False
+
+        lower = max(0, close - _MAX_EMPHASIS_CONTEXT_CHARS)
+        start = view.source_offset(match.start())
+        opening_end = self.source.rfind("_", lower, start)
+        if opening_end < 0:
+            return False
+        opening = opening_end
+        while opening > lower and self.source[opening - 1] == "_":
+            opening -= 1
+            if opening_end - opening >= 3:
+                return False
+        if opening_end - opening + 1 != close_end - close:
+            return False
+        if opening:
+            preceding = self.source[opening - 1]
+            if not (preceding.isspace() or unicodedata.category(preceding)[0] in {"P", "S"}):
+                return False
+            if _is_identifier_continuation(preceding):
+                return False
+        prefix = self.source[opening_end + 1 : start]
+        if prefix and _MARKDOWN_EMPHASIS_PREFIX.fullmatch(prefix) is None:
+            return False
+        escaped = opening
+        while escaped > lower and self.source[escaped - 1] == "\\":
+            if (opening - escaped) % 256 == 0:
+                self.check_runtime()
+            escaped -= 1
+        if (opening - escaped) % 2 or (escaped == lower and lower > 0):
+            return False
+        body = self.source[opening_end + 1 : close]
+        self.check_runtime()
+        return "`" not in body and "_" not in body and _MARKDOWN_BLANK_LINE.search(body) is None
+
     def target_is_identifier_prefix(self, match: re.Match[str], view: SecurityTextView) -> bool:
         """A target noun must end before an identifier continuation."""
         end = match.end()
@@ -777,6 +845,8 @@ class _PreparedAnalysis:
                             or unicodedata.category(character) in {"Mn", "Mc", "Pc"}
                         )
                     return True
+        if qualified and self._target_closes_markdown_emphasis(match, view):
+            return False
         if end < len(view.text):
             if _is_identifier_continuation(view.text[end]):
                 return True
@@ -837,7 +907,9 @@ def prepare_analysis(
     spans: dict[int, int] = {}
     check_runtime()
     if file_type != "markdown" or len(content) > _MAX_HEADING_CONTEXT_CHARS:
-        return _PreparedAnalysis(MappingProxyType(spans), content, check_runtime)
+        return _PreparedAnalysis(
+            MappingProxyType(spans), content, check_runtime, file_type == "markdown"
+        )
     offset = 0
     for index, raw_line in enumerate(content.splitlines(keepends=True)):
         if index % 128 == 0:
@@ -868,7 +940,7 @@ def prepare_analysis(
     ):
         spans.clear()
     check_runtime()
-    return _PreparedAnalysis(MappingProxyType(spans), content, check_runtime)
+    return _PreparedAnalysis(MappingProxyType(spans), content, check_runtime, True)
 
 
 def _report_heading_target(line: str) -> tuple[int, int] | None:
