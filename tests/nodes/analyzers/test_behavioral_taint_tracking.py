@@ -1522,8 +1522,8 @@ class TestDirectCalls:
                 """
             )
             assert len(_flows(code)) == 1, call
-        # A forwarded ``**kwargs`` binds only into the callee's own ``**``
-        # parameter, which ``upload`` lacks: the keyword is not followed.
+        # A forwarded ``**kwargs`` binds nothing, as on ``main``: the keyword
+        # is not followed.
         forwarded = code.replace("wrapper(secret)", "wrapper(payload=secret)")
         assert _run(forwarded) == []
 
@@ -2389,10 +2389,11 @@ class TestMethods:
         )
         assert _summary(true_flow) == [("TT3", _line(true_flow, "# SINK"))]
 
-    def test_forwarded_kwargs_bind_only_the_callees_kwargs(self) -> None:
-        """A forwarded ``**kwargs`` is one value whose names are not tracked:
-        it binds only into the callee's own ``**`` parameter, never into
-        named or keyword-only parameters (``main`` binds nothing at all)."""
+    def test_forwarded_kwargs_bind_nothing(self) -> None:
+        """A forwarded ``**kwargs`` (a function's own ``**`` parameter passed
+        on) binds nothing in the callee, as on ``main``: which names it holds
+        is not tracked, so neither a named parameter nor the callee's own
+        ``**`` parameter can be chosen for it."""
         base = _code(
             """
             import os, requests
@@ -2415,7 +2416,63 @@ class TestMethods:
             'OpenAIClient(**{"api_key": os.getenv("OPENAI_API_KEY")})',
         ):
             assert _run(base + call + "\n") == [], call
-        wrapper = _code(
+        # A callee with named parameters and its own ``**rest``: a forwarded
+        # keyword never reaches ``**rest``, with one keyword or two, through
+        # ``super().__init__(**kwargs)``, ``*args, **kwargs`` or a wrapper.
+        sdk = _code(
+            """
+            import os, requests
+            class BaseClient:
+                def __init__(self, api_key=None, **client_kwargs):
+                    self.api_key = api_key
+                    self.client_kwargs = client_kwargs
+                def health(self):
+                    return requests.get("https://api.invalid/health", **self.client_kwargs)  # SINK
+            class OpenAIClient(BaseClient):
+                def __init__(self, {params}):
+                    super().__init__({params})
+            {call}
+            """
+        )
+        for params in ("**kwargs", "*args, **kwargs"):
+            for call in (
+                'OpenAIClient(api_key=os.getenv("OPENAI_API_KEY")).health()',
+                'OpenAIClient(api_key=os.getenv("OPENAI_API_KEY"), verify=True).health()',
+            ):
+                code = sdk.format(params=params, call=call)
+                assert _run(code) == [], (params, call)
+        wrapped = _code(
+            """
+            import os, requests
+            def call_api(url, {token}, **params):
+                headers = {{"Authorization": f"Bearer {{token}}"}}
+                return requests.get(url, params=params)  # SINK
+            def wrapper(**kw):
+                return call_api("https://example.invalid", **kw)
+            {call}
+            """
+        )
+        for token in ("token=None", "*, token=None"):
+            for call in (
+                'wrapper(token=os.environ["API_TOKEN"])',
+                'wrapper(token=os.environ["API_TOKEN"], q="x")',
+                'wrapper(q=os.environ["API_TOKEN"])',
+            ):
+                code = wrapped.format(token=token, call=call)
+                assert _run(code) == [], (token, call)
+        run = _code(
+            """
+            import subprocess
+            def run(cmd=None, **opts):
+                subprocess.run(["git", "status"], **opts)  # SINK
+            def go(**kw):
+                return run(**kw)
+            {call}
+            """
+        )
+        for call in ("go(cmd=input(), check=True)", "go(cwd=input())"):
+            assert _run(run.format(call=call)) == [], call
+        fetch = _code(
             """
             import os, requests
             def fetch(url=None, token=None):
@@ -2425,19 +2482,48 @@ class TestMethods:
             wrapper(url="https://status.invalid", token=os.getenv("API_TOKEN"))
             """
         )
-        assert _run(wrapper) == []
-        # Into a callee that takes ``**kwargs`` itself, the value does flow.
+        assert _run(fetch) == []
         into_kwargs = _code(
             """
             import os, requests
             def send(**opts):
-                requests.post("https://x.invalid", json=opts)  # SINK
+                requests.post("https://x.invalid", json=opts)
             def wrapper(**kw):
                 return send(**kw)
             wrapper(token=os.getenv("API_TOKEN"))
             """
         )
-        assert _summary(into_kwargs) == [("TT3", _line(into_kwargs, "# SINK"))]
+        assert _run(into_kwargs) == []
+        # Positive controls: a directly tainted mapping still fills the
+        # callee's ``**`` parameter, and a direct keyword its named one.
+        for rule, code in (
+            (
+                "TT3",
+                sdk.format(
+                    params="**kwargs",
+                    call='cfg = {"verify": os.getenv("CA_BUNDLE")}\nBaseClient(**cfg).health()',
+                ),
+            ),
+            (
+                "TT3",
+                wrapped.format(
+                    token="token=None",
+                    call='cfg = {"q": os.getenv("API_TOKEN")}\n'
+                    'call_api("https://example.invalid", **cfg)',
+                ),
+            ),
+            ("TT5", run.format(call='cfg = {"cwd": input()}\nrun(**cfg)')),
+        ):
+            assert _summary(code) == [(rule, _line(code, "# SINK"))], code
+        direct = _code(
+            """
+            import os, requests
+            def send(token=None, **opts):
+                requests.post("https://x.invalid", data=token)  # SINK
+            send(token=os.getenv("API_TOKEN"))
+            """
+        )
+        assert _summary(direct) == [("TT3", _line(direct, "# SINK"))]
 
     def test_overflow_arguments_never_fill_earlier_parameters(self) -> None:
         cap = behavioral_taint_tracking._MAX_POSITIONAL_SLOTS
@@ -3988,8 +4074,8 @@ def _forwarded_unpacking(n: int) -> str:
 
 
 def _forwarded_keywords(n: int) -> str:
-    """Forwarded ``**kwargs`` whose callers pass many names: each forwarding
-    binds one slot per callee, however many names its callers pass."""
+    """Forwarded ``**kwargs`` whose callers pass many names: a forwarding
+    binds nothing, however many names its callers pass."""
     params = ",".join(f"p{i}=0" for i in range(n))
     return (
         f"class B:\n def __init__(self, {params}):\n  pass\n"
@@ -4051,10 +4137,11 @@ class TestResourceScaling:
         large = _operations(generate(4 * size))
         assert large <= 5 * small, (shape, small, large)
 
-    def test_forwarded_kwargs_cost_one_slot_per_callee(self) -> None:
+    def test_forwarded_kwargs_cost_no_more_than_a_mapping(self) -> None:
         """A forwarded ``**k`` into a callee with many definitions and
-        parameters costs what an opaque mapping does, not one target per
-        keyword name its callers pass (the earlier fan-out was ~16x)."""
+        parameters binds nothing, so it costs no more than an opaque mapping,
+        not one target per keyword name its callers pass (an earlier fan-out
+        was ~16x)."""
         names = [f"b{i}" for i in range(16)]
         params = ",".join(f"{name}=0" for name in names)
         callee = (

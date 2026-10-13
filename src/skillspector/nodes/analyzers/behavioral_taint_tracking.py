@@ -813,7 +813,7 @@ class _ScopeIndex:
         self.class_reads: dict[tuple[int, int, int], None] = {}
         self.class_read_views: dict[ast.Name, int] = {}
         # Keys of ``**kwargs`` parameters: forwarding one (``f(**kwargs)``)
-        # binds only into the callee's own ``**kwargs``.
+        # binds nothing in the callee, as on ``main``.
         self.kwarg_params: set[int] = set()
         self.class_of_key: dict[int, _Class] = {}
         self.function_groups: dict[int, _Group] = {}
@@ -1714,9 +1714,9 @@ class _TaintGraph:
         ``_MAX_POSITIONAL_SLOTS`` or beyond share the last one. ``**mapping``
         binds a wildcard keyed by the offset, so an implicit ``self`` / ``cls``
         is never filled by an unpacking. A forwarded ``**kwargs`` (a function's
-        own ``**`` parameter) binds only into the callee's ``**`` parameter:
-        which names it holds is not tracked, so it never fills named ones.
-        Every argument costs one slot per callee, whatever its shape.
+        own ``**`` parameter) binds nothing, as on ``main``: which names it
+        holds is not tracked, so no parameter can be chosen for it. Every
+        other argument costs one slot per callee, whatever its shape.
         """
         slots: list[list[int]] = []
         starred_at = -1
@@ -1738,11 +1738,10 @@ class _TaintGraph:
         for keyword in node.keywords:
             self.tick()
             keys = []
-            forwarded = keyword.arg is None and self.forwards_kwargs(keyword.value)
+            if keyword.arg is None and self.forwards_kwargs(keyword.value):
+                slots.append(keys)
+                continue
             for group, offset in members:
-                if forwarded:
-                    keys.append(self.slot(group, "**fwd"))
-                    continue
                 if keyword.arg is None:
                     keys.append(self.slot(group, ("**", offset)))
                     continue
@@ -1791,8 +1790,9 @@ class _TaintGraph:
         Parameter *i* reads positional slot *i*, the ``*args`` wildcards that
         start at or before *i*, its keyword slot and the ``**mapping``
         wildcards whose receiver offset is at most *i* (keywords and mappings
-        never reach positional-only parameters). A ``**kwargs`` parameter also
-        reads forwarded ``**kwargs``.
+        never reach positional-only parameters). A ``**kwargs`` parameter
+        reads the keywords no named parameter takes and the ``**mapping``
+        wildcards.
         """
         index = self.index
         for group in index.groups:
@@ -1808,7 +1808,6 @@ class _TaintGraph:
                 (offset, slots[("**", offset)]) for offset in (0, 1) if ("**", offset) in slots
             ]
             rest = slots.get("kw*")
-            forwarded = slots.get("**fwd")
             for function in group.functions:
                 self.tick()
                 args = function.node.args
@@ -1832,7 +1831,7 @@ class _TaintGraph:
                     )
                     self.bind_parameter(reads, index.key(scope, args.vararg.arg))
                 if args.kwarg is not None:
-                    reads = [rest, forwarded, *(key for _, key in mappings)]
+                    reads = [rest, *(key for _, key in mappings)]
                     self.bind_parameter(reads, index.key(scope, args.kwarg.arg))
 
     def bind_parameter(self, reads: list[int | None], target: int) -> None:
