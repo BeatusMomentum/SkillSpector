@@ -41,6 +41,7 @@ from skillspector.artifacts import (
     ArtifactDisposition,
     ArtifactRecord,
     ContentKind,
+    binary_instruction_view,
     classify_artifact,
     decode_text,
     promote_artifact_to_decoded_text,
@@ -1150,7 +1151,10 @@ def _mark_unanalyzed_executables(
             }
         )
         artifact.setdefault("reason", reason.value)
-        if readable_executable and artifact["disposition"] == ArtifactDisposition.ANALYZED:
+        if readable_executable and artifact["disposition"] in {
+            ArtifactDisposition.ANALYZED,
+            ArtifactDisposition.OUT_OF_SCOPE,
+        }:
             artifact["disposition"] = ArtifactDisposition.PARTIAL
         events.append(
             ledger_event(
@@ -2063,6 +2067,8 @@ def _read_file_cache(
                 and not _is_hidden_path(path)
                 and (artifact["content_kind"] == "text" or artifact.get("readable_binary"))
             ):
+                if artifact.get("readable_binary"):
+                    content = binary_instruction_view(content)[0].text
                 if truncated:
                     content = _llm_view_of_truncated_file(
                         content,
@@ -3388,22 +3394,6 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
     selected_primary = state.get("primary_file_path")
     for artifact in artifact_inventory:
         path = artifact["path"]
-        if (
-            artifact.get("readable_binary")
-            and artifact.get("referenced")
-            and path not in excluded_nested_components
-        ):
-            if artifact["disposition"] == ArtifactDisposition.ANALYZED:
-                artifact["disposition"] = ArtifactDisposition.PARTIAL
-            content_interpretation_events.append(
-                ledger_event(
-                    outcome=LedgerOutcome.PARTIAL,
-                    record_type=LedgerRecordType.SYSTEM,
-                    phase="cache",
-                    path=path,
-                    reason=LedgerReason.OPAQUE_CONTENT,
-                )
-            )
         # A skill entry point retains its role below directory and virtual ZIP
         # boundaries (e.g. bundle.dat!/pkg/SKILL.md). Renaming a supported ZIP
         # must not turn its required instructions into a passive binary asset.
@@ -3624,6 +3614,41 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
             )
         )
 
+    # Python's successful source decode takes precedence over a magic prefix.
+    for artifact in artifact_inventory:
+        path = artifact["path"]
+        if (
+            not artifact.get("readable_binary")
+            or artifact["content_kind"] != ContentKind.BINARY
+            or path in excluded_nested_components
+        ):
+            continue
+        _, projection_truncated = binary_instruction_view(local_file_cache.get(path, ""))
+        partial = bool(artifact.get("referenced")) or projection_truncated
+        reason = LedgerReason.SIZE_LIMIT if projection_truncated else LedgerReason.OPAQUE_CONTENT
+        if artifact["disposition"] == ArtifactDisposition.ANALYZED:
+            artifact["disposition"] = (
+                ArtifactDisposition.PARTIAL if partial else ArtifactDisposition.OUT_OF_SCOPE
+            )
+        content_interpretation_events.append(
+            ledger_event(
+                outcome=LedgerOutcome.OUT_OF_SCOPE,
+                record_type=LedgerRecordType.SCOPE_BOUNDARY,
+                phase="cache",
+                path=path,
+                reason=LedgerReason.BINARY_TEXT_PROJECTION,
+            )
+        )
+        if partial:
+            content_interpretation_events.append(
+                ledger_event(
+                    outcome=LedgerOutcome.PARTIAL,
+                    record_type=LedgerRecordType.SYSTEM,
+                    phase="cache",
+                    path=path,
+                    reason=reason,
+                )
+            )
     llm_components = sorted(llm_file_cache)
     file_cache = dict(llm_file_cache)
     manifest_events: list[InspectionLedgerEvent] = []

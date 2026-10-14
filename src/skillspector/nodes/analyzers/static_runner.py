@@ -37,6 +37,7 @@ from skillspector.artifacts import (
     ContentKind,
     SecurityTextView,
     _contains_default_ignorable,
+    binary_instruction_view,
     is_default_ignorable,
     security_text_views,
 )
@@ -2310,9 +2311,58 @@ def _scan_all_views_detailed(
     started_at: float | None = None,
     python_ast: ParsedPythonFile | None = None,
     python_source: bool | None = None,
+    readable_binary: bool = False,
 ) -> tuple[list[Finding], LedgerReason | None, dict[str, int | float]]:
     """Scan bounded raw windows and return any limit with observed/limit metrics."""
     started_at = time.monotonic() if started_at is None else started_at
+    if readable_binary:
+        modules = [
+            module
+            for module in pattern_modules
+            if getattr(module, "ANALYZER_ID", "")
+            in {
+                "static_patterns_prompt_injection",
+                "static_patterns_privilege_escalation",
+                "static_patterns_data_exfiltration",
+            }
+        ]
+        if not modules:
+            return [], None, {}
+        view, truncated = binary_instruction_view(content)
+        findings, reason, metrics = _scan_all_views_detailed(
+            path,
+            view.text,
+            modules,
+            None,
+            max_findings=max_findings,
+            timeout_seconds=timeout_seconds,
+            started_at=started_at,
+            python_source=False,
+        )
+        findings = [
+            finding
+            for finding in findings
+            if finding.rule_id
+            in {
+                "P1",
+                "P3",
+                "P4",
+                "PE3",
+                "E1",
+                "E2",
+                "E3",
+            }
+        ]
+        _restore_source_lines(
+            findings,
+            raw_window=content,
+            window_line=1,
+            view=view,
+            source_line_starts=logical_line_starts(content),
+        )
+        if truncated and reason is None:
+            reason = LedgerReason.SIZE_LIMIT
+        return findings, reason, metrics
     ast_modules = [module for module in pattern_modules if _uses_python_ast(module)]
     lexical_modules = [module for module in pattern_modules if not _uses_python_ast(module)]
     if python_source is None:
@@ -3066,16 +3116,6 @@ def _cleanup_expired_path_findings(
     return [] if has_postprocessor else findings
 
 
-def _binary_text_findings(findings: list[Finding], content: str) -> list[Finding]:
-    """Binary NUL bytes alone do not establish concealed instructions."""
-    del content
-    return [
-        finding
-        for finding in findings
-        if not (finding.rule_id == "P2" and finding.matched_text == "\x00")
-    ]
-
-
 def run_static_patterns(
     state: Mapping[str, object],
     pattern_modules: list,
@@ -3184,6 +3224,7 @@ def run_static_patterns(
             started_at=path_started_at,
             python_ast=python_ast,
             python_source=python_source,
+            readable_binary=path in readable_binary_paths,
         )
         runtime_limit = MAX_STATIC_ANALYSIS_SECONDS_PER_ARTIFACT
         if shared_remaining is not None:
@@ -3208,8 +3249,6 @@ def run_static_patterns(
                     pattern_modules,
                     path_findings,
                 )
-        if path in readable_binary_paths:
-            path_findings = _binary_text_findings(path_findings, content)
         findings.extend(path_findings[:path_limit])
 
     return findings
@@ -3390,6 +3429,7 @@ def run_static_patterns_with_ledger(
                             started_at=path_started_at,
                             python_ast=python_ast,
                             python_source=python_source,
+                            readable_binary=bool(artifact.get("readable_binary")),
                         )
                         fully_scanned_aggregate_overflow = bool(
                             resource_limit is LedgerReason.OUTPUT_LIMIT
@@ -3501,8 +3541,6 @@ def run_static_patterns_with_ledger(
                     }
                     path_findings = path_findings[:remaining]
                     resource_limit = LedgerReason.OUTPUT_LIMIT
-                if artifact.get("readable_binary"):
-                    path_findings = _binary_text_findings(path_findings, content)
                 findings.extend(path_findings)
                 oversized_python = (
                     source_classification is not None

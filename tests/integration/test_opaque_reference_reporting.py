@@ -304,7 +304,14 @@ def test_cli_keeps_ae1_for_valid_png_used_as_a_command_operand(tmp_path: Path) -
         "<pre>\n![Chart](assets/helper.png)\n</pre>",
         "[Inspect assets/helper.png](SKILL.md)",
     ],
-    ids=["quote-fence", "list-fence", "tab-indent", "comment", "html", "distinct-label"],
+    ids=[
+        "quote-fence",
+        "list-fence",
+        "tab-indent",
+        "comment",
+        "html",
+        "distinct-label",
+    ],
 )
 def test_graph_retains_ae1_for_non_image_reference_contexts(
     tmp_path: Path, reference_text: str
@@ -432,7 +439,7 @@ def test_referenced_executable_binary_keeps_ae1_and_concealment_signal(
     assert any(finding.rule_id == "AE1" for finding in result["findings"])
     assert any(finding.rule_id == "SC9" for finding in result["findings"])
     assert result["risk_recommendation"] == "DO_NOT_INSTALL"
-    readable = filename == "program.exe"
+    readable = False
     completeness = result["analysis_completeness"]
     assert completeness["partially_inspected_files"] == int(readable)
     assert completeness["entirely_uninspected_files"] == int(not readable)
