@@ -20,9 +20,10 @@ from threading import Thread
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage
+
 from contrib.batch_scan import batch_scan, runner
 from contrib.batch_scan.gap_fill import run_gap_fill
-from langchain_core.messages import AIMessage
 from skillspector import llm_analyzer_base
 from skillspector.nodes.build_context import build_context
 
@@ -968,6 +969,7 @@ async def test_pooled_key_retries_share_one_deadline(monkeypatch, asynchronous):
 
 def test_pooled_client_bounds_connect_and_disables_sdk_retries(monkeypatch):
     import langchain_openai
+
     from contrib.batch_scan.api_pool import ApiKey, ApiKeyPool, PooledChatModel
 
     key = ApiKey("synthetic", None, "test")
