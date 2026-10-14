@@ -297,6 +297,9 @@ def run_gap_fill(
         Detected language string (``"zh"``, ``"ja"``, ``"ko"``, ``"en"``).
     model :
         Optional model override.  Falls back to the configured default.
+    timeout :
+        Remaining gap-fill budget in seconds, or a callable returning it before
+        each request. Does not set the core graph's analysis budget.
 
     Returns
     -------
@@ -323,7 +326,21 @@ def run_gap_fill(
             for path, content in file_cache.items()
         ])
         raise GapFillError(outcome) from exc
-    outcome = analyzer.run_batches_detailed(batches, language=language)
+    outcome = BatchExecutionResult()
+    for index, batch in enumerate(batches):
+        try:
+            completed = analyzer.run_batches_detailed([batch], language=language)
+        except Exception as exc:
+            # Core deliberately propagates some provider errors. Keep earlier
+            # results and record every batch that could not finish in this pass.
+            reason = LedgerReason.RUNTIME_LIMIT if isinstance(exc, LLMRuntimeLimitError) else LedgerReason.LLM_BATCH_FAILED
+            outcome.failures.extend(
+                BatchFailure(pending, error_class=type(exc).__name__, reason=reason)
+                for pending in batches[index:]
+            )
+            raise GapFillError(outcome) from exc
+        outcome.successful.extend(completed.successful)
+        outcome.failures.extend(completed.failures)
     if outcome.failures:
         raise GapFillError(outcome)
     return analyzer.collect_findings(outcome.successful)

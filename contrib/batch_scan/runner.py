@@ -751,6 +751,10 @@ def run_one(
         Run non-English gap-fill against the graph's provider-eligible cache.
     api_pool :
         Optional API key pool for gap-fill calls.
+    timeout :
+        Per-skill worker budget in seconds. Gap-fill uses the time remaining
+        after core analysis, with reporting headroom. Core analysis keeps its
+        own budget and can still reach the worker's process timeout.
 
     Returns
     -------

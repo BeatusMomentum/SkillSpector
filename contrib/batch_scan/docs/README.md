@@ -316,6 +316,18 @@ python -m contrib.batch_scan.batch_scan ./tests/fixtures/ --no-require-llm --no-
 | 1 | ≥1 skill has HIGH or CRITICAL risk |
 | 2 | Scan errors or incomplete gap-fill occurred; `skills[].error` or `enhancements.gap_fill_error` explains the failure |
 
+
+Gap-fill uses the remaining per-skill budget after core analysis, leaving up to
+five seconds for reporting before the worker's 90-second hard limit. Its pooled
+calls receive that remaining budget; the provider pool otherwise uses its
+caller's timeout. Invalid responses can take up to four attempts within it.
+Failed setup and failed batches retain core findings and completed gap-fill
+findings. An incomplete pass records `enhancements.gap_fill_status: "incomplete"`,
+`gap_fill_error_reasons`, and `enhancements.gap_fill_error`, and exits 2 even when
+its ledger outcome is nonfatal. This deadline covers gap-fill only. Core analysis
+keeps its own budget and can reach the worker limit even when providers respect
+request timeouts. The worker limit also applies if a provider ignores its timeout.
+
 CI usage:
 
 ```bash
@@ -433,12 +445,3 @@ tests/
 ---
 
 **Next:** [DESIGN.md](DESIGN.md) — architecture & concurrency model · [REVIEW_RESPONSE.md](REVIEW_RESPONSE.md) — PR #100 review response · [CONTRIBUTING.md](../CONTRIBUTING.md) — dev setup & code conventions
-
-
-Gap-fill uses the remaining per-skill budget, leaving up to five seconds for
-reporting before the worker's 90-second hard limit. Invalid responses can take
-up to four attempts while that budget remains. Failed setup and failed batches
-retain core findings and completed gap-fill findings. An incomplete pass records
-`enhancements.gap_fill_status: "incomplete"`, `gap_fill_error_reasons`, and
-`enhancements.gap_fill_error`, and exits 2 even when its ledger outcome is nonfatal.
-The worker hard limit still applies if a provider ignores its request timeout.

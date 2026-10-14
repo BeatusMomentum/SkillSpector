@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import multiprocessing
 import os
@@ -15,13 +16,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
+from threading import Thread
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
-
 from contrib.batch_scan import batch_scan, runner
 from contrib.batch_scan.gap_fill import run_gap_fill
+from langchain_core.messages import AIMessage
 from skillspector import llm_analyzer_base
 from skillspector.nodes.build_context import build_context
 
@@ -869,23 +870,44 @@ def test_gap_fill_real_deadline_stops_retries_and_keeps_core(batch_skill, monkey
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_pooled_request_slot_wait_obeys_deadline(asynchronous):
+async def test_pooled_request_slot_wait_obeys_deadline(monkeypatch, asynchronous):
     from contrib.batch_scan.api_pool import ApiKey, ApiKeyPool, PooledChatModel
 
     pool = ApiKeyPool([ApiKey("synthetic", None, "test", max_concurrent=1)])
     occupied = pool.acquire()
     model = PooledChatModel(pool, timeout=0.02)
+
+    def no_client(*args, **kwargs):
+        raise AssertionError("slot-wait test must not build a provider client")
+
+    monkeypatch.setattr(model, "_build_llm", no_client)
+    errors = []
+
+    def invoke():
+        try:
+            model.invoke("unused")
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = None
     started = time.monotonic()
     try:
-        with pytest.raises(llm_analyzer_base.LLMRuntimeLimitError):
-            if asynchronous:
-                await model.ainvoke("unused")
-            else:
-                model.invoke("unused")
+        if asynchronous:
+            with pytest.raises(llm_analyzer_base.LLMRuntimeLimitError):
+                await asyncio.wait_for(model.ainvoke("unused"), timeout=2)
+        else:
+            worker = Thread(target=invoke, daemon=True)
+            worker.start()
+            worker.join(timeout=2)
+            assert not worker.is_alive(), "pooled slot wait ignored its deadline"
+            assert len(errors) == 1
+            assert isinstance(errors[0], llm_analyzer_base.LLMRuntimeLimitError)
         assert time.monotonic() - started < 1
         assert occupied.active_requests == 1
     finally:
         pool.release(occupied)
+        if worker is not None:
+            worker.join(timeout=2)
     assert occupied.active_requests == 0
 
 
@@ -946,7 +968,6 @@ async def test_pooled_key_retries_share_one_deadline(monkeypatch, asynchronous):
 
 def test_pooled_client_bounds_connect_and_disables_sdk_retries(monkeypatch):
     import langchain_openai
-
     from contrib.batch_scan.api_pool import ApiKey, ApiKeyPool, PooledChatModel
 
     key = ApiKey("synthetic", None, "test")
@@ -955,3 +976,55 @@ def test_pooled_client_bounds_connect_and_disables_sdk_retries(monkeypatch):
     PooledChatModel(ApiKeyPool([key]))._build_llm(key, timeout=0.1)
     assert observed["timeout"].connect == observed["timeout"].read == 0.1
     assert observed["max_retries"] == 0
+
+
+@pytest.mark.parametrize("completed_first", [False, True])
+def test_gap_fill_provider_value_error_retains_completed_findings(
+    batch_skill, monkeypatch, completed_first
+):
+    from skillspector.models import Finding
+
+    skill, _ = batch_skill
+    for name in ("notes.txt", "remaining.txt"):
+        (skill / name).write_text(_SAFE_TEXT, encoding="utf-8")
+    core = Finding(rule_id="TM1", message="Core evidence", severity="HIGH", file="SKILL.md")
+    _mock_scan(monkeypatch, lambda context: context.update(findings=[core]))
+    monkeypatch.setattr(runner, "run_gap_fill", run_gap_fill)
+    calls = []
+
+    def invoke(prompt):
+        calls.append(prompt)
+        if completed_first and len(calls) == 1:
+            return AIMessage(
+                content=json.dumps(
+                    {
+                        "findings": [
+                            {
+                                "rule_id": "P5",
+                                "message": "Gap-fill evidence",
+                                "severity": "HIGH",
+                                "confidence": 0.9,
+                            }
+                        ]
+                    }
+                )
+            )
+        raise ValueError("synthetic provider error response")
+
+    monkeypatch.setattr(
+        llm_analyzer_base, "get_chat_model", lambda **kw: SimpleNamespace(invoke=invoke)
+    )
+    monkeypatch.setattr(llm_analyzer_base, "get_max_input_tokens", lambda model: 100_000)
+    with runner.deepseek_compat():
+        entry, error = runner.run_one(
+            skill, skill.parent, use_llm=True, detected_language="zh", apply_gap_fill=True
+        )
+    assert error is not None
+    assert len(calls) == (2 if completed_first else 1)
+    ids = {issue["id"] for issue in entry["issues"]}
+    assert "TM1" in ids
+    assert ("P5" in ids) is completed_first
+    assert entry["risk_assessment"]["recommendation"] != "SAFE"
+    assert entry["enhancements"]["gap_fill_status"] == "incomplete"
+    assert entry["enhancements"]["gap_fill_error_reasons"] == ["llm_batch_failed"]
+    assert entry["analysis_completeness"]["is_complete"] is False

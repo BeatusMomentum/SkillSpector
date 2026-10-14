@@ -39,7 +39,7 @@ tests/
 │
 └── tests-pro/
     ├── test_api_pool.py                 ← 45 tests — pool acquire/release/backoff
-    ├── test_gap_fill.py                 ← 41 tests — JSON parsing, prompt building
+    ├── test_gap_fill.py                 ← 29 tests — JSON parsing, prompt building
     ├── test_runner_patches.py           ← 24 tests — context manager, patches
     ├── test_annotation.py               ← 10 tests — language compatibility
     ├── random_numbered.py               ← main entry point (seed=42)
@@ -114,7 +114,7 @@ Answers reviewer: *"Several patches depend on internal details that can break on
 | `TestResourceLeakRecovery` | 2 | Exception between acquire/release doesn't leak slot; release(failure) doesn't leak |
 | `TestIsRateLimit` | 5 | 429 in string message; OpenAI `RateLimitError` type; `rate_limit` keyword; false for `ValueError`; false for ordinary `Exception` |
 
-### `test_gap_fill.py` — 41 tests, 11 classes
+### `test_gap_fill.py` — 29 tests, 11 classes
 
 | Class | Tests | Covers |
 |-------|-------|--------|
