@@ -41,7 +41,8 @@ def require_secure_file_output() -> None:
         raise ValueError(
             "Safe file output is unsupported on this platform. "
             "For scan or batch reports, omit --output; for baselines, use --output -. "
-            "Redirect stdout only to a destination you trust."
+            "Redirect stdout to a new file outside the scan target, and replace "
+            "an existing report only after the command succeeds."
         )
 
 
@@ -96,6 +97,18 @@ def write_text_no_follow(path: str | Path, text: str) -> None:
                             f"Refusing to overwrite non-regular output {str(path)!r} "
                             f"(type {filemode(existing.st_mode)[0]!r})."
                         )
+                    descriptor = os.open(
+                        absolute.name,
+                        os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        if not S_ISREG(os.fstat(descriptor).st_mode):
+                            raise ValueError(
+                                f"Refusing to overwrite non-regular output {str(path)!r}."
+                            )
+                    finally:
+                        os.close(descriptor)
                 candidate = f".skillspector-output-{token_hex(16)}"
                 fd = os.open(
                     candidate,

@@ -1365,11 +1365,27 @@ def test_dump_baseline_preserves_read_only_destination(tmp_path: Path) -> None:
     output.write_text("existing baseline", encoding="utf-8")
     output.chmod(0o444)
 
-    with pytest.raises(PermissionError):
+    with pytest.raises(PermissionError) as error:
         dump_baseline({"version": 2}, output)
 
+    assert str(output) in str(error.value)
     assert output.read_text(encoding="utf-8") == "existing baseline"
     assert list(tmp_path.iterdir()) == [output]
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="requires unprivileged POSIX permissions"
+)
+def test_dump_baseline_parent_permission_error_names_output(tmp_path: Path) -> None:
+    output = tmp_path / "baseline.yaml"
+    tmp_path.chmod(0o555)
+    try:
+        with pytest.raises(PermissionError) as error:
+            dump_baseline({"version": 2}, output)
+        assert str(output) in str(error.value)
+        assert not output.exists()
+    finally:
+        tmp_path.chmod(0o700)
 
 
 @pytest.mark.parametrize("target_exists", [True, False])

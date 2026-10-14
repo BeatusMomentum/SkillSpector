@@ -7454,7 +7454,7 @@ def test_baseline_stdout_works_without_secure_file_output(tmp_path, monkeypatch,
 
 @pytest.mark.skipif(os.name != "posix", reason="descriptor-relative output requires POSIX")
 @pytest.mark.parametrize(
-    "mode", ["baseline-default", "baseline-json", "registry", "json", "sarif", "markdown"]
+    "mode", ["single", "baseline-default", "baseline-json", "registry", "json", "sarif", "markdown"]
 )
 def test_all_cli_writers_reject_symlink_destinations(tmp_path, monkeypatch, mode):
     monkeypatch.chdir(tmp_path)
@@ -7474,6 +7474,11 @@ def test_all_cli_writers_reject_symlink_destinations(tmp_path, monkeypatch, mode
             lambda state: {"active_findings": [], "file_cache": {}, "risk_score": 0},
         )
         args = ["baseline", str(skill), "--no-llm"]
+    elif mode == "single":
+        monkeypatch.setattr(
+            cli, "_scan_skill", lambda **kwargs: {"report_body": "report", "risk_score": 0}
+        )
+        args = ["scan", str(skill), "--no-llm", "--format", "json"]
     elif mode == "registry":
         monkeypatch.setattr(
             cli, "scan_registry", lambda *args, **kwargs: {"findings": [], "risk_score": 0}
@@ -7519,6 +7524,25 @@ def test_output_errors_name_the_requested_path(tmp_path, kind):
         write_text_no_follow(output, "report")
     assert str(output) in str(error.value)
     assert not list(tmp_path.glob(".skillspector-output-*"))
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="requires unprivileged POSIX permissions"
+)
+def test_report_output_preserves_read_only_file(tmp_path):
+    from skillspector.file_output import write_text_no_follow
+
+    output = tmp_path / "report.json"
+    output.write_text("preserve", encoding="utf-8")
+    output.chmod(0o444)
+    original = output.stat()
+    with pytest.raises(ValueError) as error:
+        write_text_no_follow(output, "replacement")
+    assert str(output) in str(error.value)
+    assert output.read_text(encoding="utf-8") == "preserve"
+    assert output.stat().st_ino == original.st_ino
+    assert output.stat().st_mode == original.st_mode
+    assert list(tmp_path.iterdir()) == [output]
 
 
 @pytest.mark.parametrize(

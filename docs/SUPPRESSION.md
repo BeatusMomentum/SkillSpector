@@ -56,7 +56,13 @@ regenerated fingerprints. Other baseline files and sibling YAML/JSON files
 remain in normal scan scope unless they are selected with `--baseline` or `-o`.
 
 Use `skillspector baseline ./my-skill/ -o -` to emit JSON on stdout. This is
-available on Windows too; redirect only to a trusted destination. File output
+available on Windows too. Redirect to a **new file outside the scan target**,
+then replace an existing baseline only after the command exits with code 0.
+Redirecting directly over the old file truncates it before the scan starts,
+even when scanning fails. On Windows PowerShell 5.1, use `cmd /c` for the
+redirection or `Out-File -Encoding utf8`; its default `>` encoding is UTF-16LE,
+which the baseline loader does not accept. Check `$LASTEXITCODE` before replacing
+the old baseline. File output
 requires POSIX no-follow directory operations and fails before analysis when
 unsupported. New baselines use mode 0600; existing baselines retain access metadata
 when safely replaced. Updates requiring in-place writes are refused. The parent
@@ -141,7 +147,9 @@ ordinary permission bits and ownership are preserved, including group-write acce
 Access ACLs are copied through validated descriptors before any content is written.
 A non-owner update, or an update that cannot preserve the destination's group,
 fails without changing the existing baseline. Use a new owner-managed output
-file or `--output -` in those cases. Generation does not fall back to in-place
+file or `--output -` redirected to a new file in those cases. Do not redirect
+over the shared baseline: that rewrites the inode in place and can change other
+hard-linked files. Generation does not fall back to in-place
 writes, which would lose the atomic replacement and hard-link safety guarantees.
 All path operations use the same no-follow parent descriptor so a directory swap
 cannot redirect the write.

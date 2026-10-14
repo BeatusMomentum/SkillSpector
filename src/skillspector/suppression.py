@@ -772,98 +772,109 @@ def dump_baseline(data: dict[str, object], path: str | Path) -> None:
     requiring in-place writes are refused, keeping the old inode untouched.
     """
     p = Path(path)
-    content = serialize_baseline(data, json_output=p.suffix.lower() == ".json")
+    try:
+        content = serialize_baseline(data, json_output=p.suffix.lower() == ".json")
+    except ValueError as exc:
+        raise ValueError(f"{exc}: {p}") from exc
     encoded = content.encode("utf-8")
-    with open_output_parent(p) as (absolute, directory_fd):
-        destination = None
-        access_descriptor = None
-        # A cooperating writer can atomically replace the path between validating
-        # and opening it. Validate the replacement from the start, but
-        # only a bounded number of times; a path that keeps changing fails closed.
-        for attempt in range(1, _BASELINE_DESTINATION_ATTEMPTS + 1):
-            final_attempt = attempt == _BASELINE_DESTINATION_ATTEMPTS
-            try:
-                destination = os.stat(absolute.name, dir_fd=directory_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                destination = None
-                break
-            if not S_ISREG(destination.st_mode):
-                raise ValueError(f"Baseline output must be a regular file: {p}")
-            if os.name == "posix" and os.geteuid() == 0 and not destination.st_mode & 0o222:
-                raise PermissionError(errno.EACCES, "Baseline output is not writable", str(p))
-            # The descriptor check handles ACL grants that mode bits omit. Root
-            # still observes the explicit read-only mode guard above.
-            flags = os.O_WRONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(absolute.name, flags, dir_fd=directory_fd)
-            try:
-                opened = os.fstat(descriptor)
-                if not S_ISREG(opened.st_mode):
-                    raise ValueError(f"Baseline output must be a regular file: {p}")
-                if (opened.st_dev, opened.st_ino) != (destination.st_dev, destination.st_ino):
-                    if final_attempt:
-                        raise ValueError(f"Baseline output changed while opening: {p}")
-                    continue
-                destination = opened
-                if os.name == "posix" and os.geteuid() not in {0, destination.st_uid}:
-                    raise PermissionError(
-                        errno.EACCES,
-                        "Cannot safely replace a baseline owned by another user; "
-                        "write to a new file or use --output -",
-                        str(p),
-                    )
-                # Retain the validated inode's access metadata while competing
-                # atomic writers replace the path. There is no need to reopen it.
-                access_descriptor = os.dup(descriptor)
-                break
-            finally:
-                os.close(descriptor)
-
-        temporary_name = None
-        try:
-            candidate = f".skillspector-baseline-{token_hex(16)}.tmp"
-            descriptor = os.open(
-                candidate,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=directory_fd,
-            )
-            temporary_name = candidate
-            with os.fdopen(descriptor, "wb") as temporary:
-                _restrict_baseline_temporary(temporary.fileno())
-                if destination is not None:
-                    current = os.fstat(temporary.fileno())
-                    if (current.st_uid, current.st_gid) != (destination.st_uid, destination.st_gid):
-                        try:
-                            os.fchown(temporary.fileno(), destination.st_uid, destination.st_gid)
-                        except PermissionError as exc:
-                            raise PermissionError(
-                                errno.EACCES,
-                                "Cannot safely preserve baseline ownership or group; "
-                                "write to a new file or use --output -",
-                                str(p),
-                            ) from exc
-                    # Keep existing group writers/readers. Newly generated files
-                    # remain private; replacing one does not revoke shared access.
-                    mode = S_IMODE(destination.st_mode) & 0o777
-                    if os.name == "posix":
-                        os.fchmod(temporary.fileno(), mode)
-                        # Clearing inherited ACLs must not remove a restrictive or
-                        # shared access ACL from the existing destination.
-                        assert access_descriptor is not None
-                        _preserve_baseline_acl(access_descriptor, temporary.fileno())
-                # Configure all destination access metadata while the file is empty.
-                temporary.write(encoded)
-                temporary.flush()
-                os.fsync(temporary.fileno())
-            os.replace(
-                temporary_name, absolute.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd
-            )
-            temporary_name = None
-        finally:
-            if access_descriptor is not None:
-                os.close(access_descriptor)
-            if temporary_name is not None:
+    try:
+        with open_output_parent(p) as (absolute, directory_fd):
+            destination = None
+            access_descriptor = None
+            # A cooperating writer can atomically replace the path between validating
+            # and opening it. Validate the replacement from the start, but
+            # only a bounded number of times; a path that keeps changing fails closed.
+            for attempt in range(1, _BASELINE_DESTINATION_ATTEMPTS + 1):
+                final_attempt = attempt == _BASELINE_DESTINATION_ATTEMPTS
                 try:
-                    os.unlink(temporary_name, dir_fd=directory_fd)
+                    destination = os.stat(absolute.name, dir_fd=directory_fd, follow_symlinks=False)
                 except FileNotFoundError:
-                    pass
+                    destination = None
+                    break
+                if not S_ISREG(destination.st_mode):
+                    raise ValueError(f"Baseline output must be a regular file: {p}")
+                if os.name == "posix" and os.geteuid() == 0 and not destination.st_mode & 0o222:
+                    raise PermissionError(errno.EACCES, "Baseline output is not writable", str(p))
+                # The descriptor check handles ACL grants that mode bits omit. Root
+                # still observes the explicit read-only mode guard above.
+                flags = os.O_WRONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(absolute.name, flags, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(descriptor)
+                    if not S_ISREG(opened.st_mode):
+                        raise ValueError(f"Baseline output must be a regular file: {p}")
+                    if (opened.st_dev, opened.st_ino) != (destination.st_dev, destination.st_ino):
+                        if final_attempt:
+                            raise ValueError(f"Baseline output changed while opening: {p}")
+                        continue
+                    destination = opened
+                    if os.name == "posix" and os.geteuid() not in {0, destination.st_uid}:
+                        raise PermissionError(
+                            errno.EACCES,
+                            "Cannot safely replace a baseline owned by another user; "
+                            "write to a new file or use --output - redirected to a new file",
+                            str(p),
+                        )
+                    # Retain the validated inode's access metadata while competing
+                    # atomic writers replace the path. There is no need to reopen it.
+                    access_descriptor = os.dup(descriptor)
+                    break
+                finally:
+                    os.close(descriptor)
+
+            temporary_name = None
+            try:
+                candidate = f".skillspector-baseline-{token_hex(16)}.tmp"
+                descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                temporary_name = candidate
+                with os.fdopen(descriptor, "wb") as temporary:
+                    _restrict_baseline_temporary(temporary.fileno())
+                    if destination is not None:
+                        current = os.fstat(temporary.fileno())
+                        if (current.st_uid, current.st_gid) != (
+                            destination.st_uid,
+                            destination.st_gid,
+                        ):
+                            try:
+                                os.fchown(
+                                    temporary.fileno(), destination.st_uid, destination.st_gid
+                                )
+                            except PermissionError as exc:
+                                raise PermissionError(
+                                    errno.EACCES,
+                                    "Cannot safely preserve baseline ownership or group; "
+                                    "write to a new file or use --output - redirected to a new file",
+                                    str(p),
+                                ) from exc
+                        # Keep existing group writers/readers. Newly generated files
+                        # remain private; replacing one does not revoke shared access.
+                        mode = S_IMODE(destination.st_mode) & 0o777
+                        if os.name == "posix":
+                            os.fchmod(temporary.fileno(), mode)
+                            # Clearing inherited ACLs must not remove a restrictive or
+                            # shared access ACL from the existing destination.
+                            assert access_descriptor is not None
+                            _preserve_baseline_acl(access_descriptor, temporary.fileno())
+                    # Configure all destination access metadata while the file is empty.
+                    temporary.write(encoded)
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                os.replace(
+                    temporary_name, absolute.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd
+                )
+                temporary_name = None
+            finally:
+                if access_descriptor is not None:
+                    os.close(access_descriptor)
+                if temporary_name is not None:
+                    try:
+                        os.unlink(temporary_name, dir_fd=directory_fd)
+                    except FileNotFoundError:
+                        pass
+    except OSError as exc:
+        raise OSError(exc.errno, exc.strerror or str(exc), str(p)) from exc
