@@ -3596,7 +3596,13 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
                 phase="signature_projection", path=path, now=projection_finished
             )
             continue
-        if path in llm_file_cache:
+        artifact = inventory_by_path.get(path)
+        bounded_provider_view = artifact is not None and (
+            artifact.get("disposition") == ArtifactDisposition.PARTIAL
+            and artifact.get("reason")
+            in {LedgerReason.SIZE_LIMIT.value, LedgerReason.TOTAL_BYTES_LIMIT.value}
+        )
+        if path in llm_file_cache and projection.view.name != "raw" and not bounded_provider_view:
             llm_file_cache[path] = projection.view.text
         if not projection.complete:
             signature_events.append(
@@ -3608,7 +3614,6 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
                     reason=LedgerReason.OMS_SIGNATURE,
                 )
             )
-            artifact = inventory_by_path.get(path)
             if artifact is not None and artifact["disposition"] == ArtifactDisposition.ANALYZED:
                 artifact["disposition"] = ArtifactDisposition.PARTIAL
                 artifact["reason"] = LedgerReason.OMS_SIGNATURE.value

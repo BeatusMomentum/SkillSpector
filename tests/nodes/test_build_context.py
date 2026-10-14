@@ -1038,6 +1038,50 @@ def test_oms_projection_preserves_crlf_and_rejects_duplicate_fields(
     assert any(event.get("reason_code") == "oms_signature" for event in result["inspection_ledger"])
 
 
+@pytest.mark.parametrize("name", ["skill.oms.sig", "bundle.json"])
+@pytest.mark.parametrize("escaped_key", [False, True])
+def test_oversized_oms_bundle_keeps_an_explicit_projection_gap(tmp_path, name, escaped_key):
+    import skillspector.oms as oms
+
+    bundle = json.loads(_OMS_FIXTURE.read_bytes())
+    bundle["notes"] = "A" * oms._MAX_CHARS
+    content = json.dumps(bundle)
+    if escaped_key:
+        content = content.replace('"dsseEnvelope"', r'"dss\u0065Envelope"')
+    (tmp_path / name).write_text(content)
+
+    result = build_context({"skill_path": str(tmp_path), "use_llm": False})
+
+    assert result["local_file_cache"][name] == content
+    assert any(event.get("reason_code") == "oms_signature" for event in result["inspection_ledger"])
+
+
+@pytest.mark.parametrize("parseable_prefix", [False, True])
+def test_oms_projection_preserves_bounded_provider_view_for_truncated_files(
+    tmp_path, monkeypatch, parseable_prefix
+):
+    from importlib import import_module
+
+    module = import_module("skillspector.nodes.build_context")
+    monkeypatch.setattr(module, "MAX_TOTAL_CACHED_BYTES", 600_000)
+    bundle = json.loads(_OMS_FIXTURE.read_bytes())
+    if parseable_prefix:
+        content = json.dumps(bundle) + " " * 800_000
+    else:
+        bundle["notes"] = "A" * 800_000
+        content = json.dumps(bundle)
+    (tmp_path / "bundle.json").write_text(content)
+
+    result = build_context({"skill_path": str(tmp_path)})
+
+    view = result["llm_file_cache"]["bundle.json"]
+    assert len(view) <= module.MAX_LLM_TRUNCATED_FILE_CHARS
+    assert "not reviewed by any analyzer" in view
+    artifact = next(item for item in result["artifact_inventory"] if item["path"] == "bundle.json")
+    assert artifact["disposition"] == ArtifactDisposition.PARTIAL
+    assert artifact["reason"] == LedgerReason.TOTAL_BYTES_LIMIT.value
+
+
 def test_build_context_skips_skip_dirs(tmp_path: Path) -> None:
     """Skip dirs like __pycache__ and node_modules are not included in components."""
     _make_skill_spec_dir(tmp_path)
