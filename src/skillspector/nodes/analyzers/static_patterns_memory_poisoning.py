@@ -282,7 +282,7 @@ _HARDWARE_RESET_STATE = re.compile(
 _HARDWARE_CLOCK = re.compile(r"\bclocks?\b", re.IGNORECASE)
 _HARDWARE_AGENT_REFERENCE = re.compile(
     r"\b(?:you|your|agents?|assistants?|models?|llms?|bots?|conversation|memory|"
-    r"context|prompt|instructions?|directives?)\b"
+    r"context|history|chat|transcript|dialogue|prompt|instructions?|directives?)\b"
     r"|\bbefore[ \t]+(?:replying|responding|answering)\b",
     re.IGNORECASE,
 )
