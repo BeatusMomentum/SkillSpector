@@ -428,7 +428,7 @@ tests/
 ├── test_monkeypatch_fragility.py     ← Issue #2: 26 tests (guard verification)
 ├── tests-pro/
 │   ├── test_api_pool.py              ← Issue #3: 45 tests (acquire/backoff)
-│   ├── test_gap_fill.py              ← Issue #3: 41 tests (JSON parsing)
+│   ├── test_gap_fill.py              ← Issue #3: 29 tests (JSON parsing)
 │   ├── test_runner_patches.py        ← Issue #3: 24 tests (context manager)
 │   └── test_annotation.py            ← Issue #3: 10 tests (language compat)
 └── docs/
