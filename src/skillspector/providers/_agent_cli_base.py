@@ -74,13 +74,23 @@ class AgentCLIProviderBase:
     def is_available(self) -> tuple[bool, str | None]:
         """Binary on PATH AND authenticated (delegates to the registry probe).
 
-        Warns once per process when the CLI is usable, before any LLM call
-        fans out, because each call is a full agent session on the user's plan.
+        Warns once per process when the CLI is usable (see
+        :meth:`warn_session_cost`), so callers that probe up front, such as
+        the MCP server, warn before any scan starts.
         """
         available, error = _agent_cli.is_available(self.BINARY_NAME)
         if available:
-            _warn_session_cost_once(self.BINARY_NAME)
+            self.warn_session_cost()
         return available, error
+
+    def warn_session_cost(self) -> None:
+        """Warn once per process that each LLM call is a full agent session.
+
+        ``get_chat_model()`` calls this before the analyzers fan out, because
+        ``skillspector scan`` only probes :meth:`is_available` from the report
+        node, after every LLM call has run.
+        """
+        _warn_session_cost_once(self.BINARY_NAME)
 
     # -- Transport -----------------------------------------------------------
 

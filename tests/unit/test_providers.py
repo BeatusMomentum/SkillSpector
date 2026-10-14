@@ -36,6 +36,7 @@ import skillspector.providers._agent_cli as agent_cli_module
 import skillspector.providers._agent_cli_base as agent_cli_base_module
 import skillspector.providers.anthropic.provider as anthropic_provider_module
 from skillspector.inference_usage import chat_model_controls, chat_model_requested_controls
+from skillspector.llm_utils import get_chat_model
 from skillspector.providers import (
     NO_LLM_API_KEY_MESSAGE,
     chat_models,
@@ -1109,6 +1110,35 @@ class TestAgentCLISessionCostWarning:
         with caplog.at_level("WARNING", logger=agent_cli_base_module.logger.name):
             assert ClaudeCLIProvider().is_available() == (False, "not logged in")
         assert not [r for r in caplog.records if "separate claude session" in r.getMessage()]
+
+    def test_warns_before_first_cli_call_without_availability_probe(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # `skillspector scan` builds its chat model before any CLI call and only
+        # probes is_available() from the report node, after the calls have run.
+        def _no_probe(name: str) -> tuple[bool, str | None]:
+            raise AssertionError("the scan path must warn without probing availability")
+
+        warned_before_call: list[bool] = []
+
+        def _run_agent_cli(binary: str, prompt: str, **kwargs: object) -> str:
+            warned_before_call.append(
+                any("separate claude session" in r.getMessage() for r in caplog.records)
+            )
+            return "pong"
+
+        monkeypatch.setattr(agent_cli_module, "is_available", _no_probe)
+        monkeypatch.setattr(agent_cli_module, "run_agent_cli", _run_agent_cli)
+        token = use_provider(ClaudeCLIProvider())
+        try:
+            with caplog.at_level("WARNING", logger=agent_cli_base_module.logger.name):
+                assert get_chat_model().invoke("ping").content == "pong"
+                assert get_chat_model().invoke("ping").content == "pong"
+        finally:
+            reset_provider(token)
+        assert warned_before_call == [True, True]
+        warnings = [r for r in caplog.records if "separate claude session" in r.getMessage()]
+        assert len(warnings) == 1
 
 
 class TestAgentCLIProviderMetadata:
