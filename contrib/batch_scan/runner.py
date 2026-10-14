@@ -38,9 +38,16 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from skillspector.graph import graph
 from skillspector.inspection_ledger import finalize_ledger
-from skillspector.llm_analyzer_base import LLMAnalyzerBase, LLMAnalysisResult, ledger_events_for_batches
+from skillspector.llm_analyzer_base import (
+    LLMAnalyzerBase,
+    LLMAnalysisResult,
+    _StructuredResponseValidationError,
+    ledger_events_for_batches,
+)
 from skillspector.logging_config import get_logger
 from skillspector.nodes.meta_analyzer import LLMMetaAnalyzer, MetaAnalyzerResult
 
@@ -151,23 +158,11 @@ def _patched_base_parse(self, response, batch):
     text = _strip_markdown_fences(str(response))
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "LLMAnalyzerBase.parse_response: invalid JSON for %s: %s",
-            batch.file_label,
-            exc,
-        )
-        return []
-    try:
         result = LLMAnalysisResult.model_validate(data)
-        return [f.to_finding(batch.file_path) for f in result.findings]
-    except Exception as exc:
-        logger.warning(
-            "LLMAnalyzerBase.parse_response: schema validation failed for %s: %s",
-            batch.file_label,
-            exc,
-        )
-        return []
+    except (json.JSONDecodeError, ValidationError) as exc:
+        # Keep raw-response providers on the core retry and failure-ledger path.
+        raise _StructuredResponseValidationError from exc
+    return [f.to_finding(batch.file_path) for f in result.findings]
 
 
 # -- Patch 3: LLMMetaAnalyzer.parse_response handles raw JSON ---------------
@@ -179,7 +174,9 @@ def _sanitize_meta_finding(d: dict) -> dict:
     for key in ("remediation", "explanation"):
         if d.get(key) is None:
             d[key] = ""
-    if d.get("impact") not in ("critical", "high", "medium", "low"):
+    impact = d.get("impact")
+    d["impact"] = impact.casefold() if isinstance(impact, str) else "low"
+    if d["impact"] not in ("critical", "high", "medium", "low"):
         d["impact"] = "low"
     return d
 
@@ -191,28 +188,20 @@ def _patched_meta_parse(self, response, batch):
     text = _strip_markdown_fences(str(response))
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "LLMMetaAnalyzer.parse_response: invalid JSON for %s: %s",
-            batch.file_label,
-            exc,
-        )
-        return []
-    try:
+        if isinstance(data, dict) and isinstance(data.get("findings"), list):
+            data["findings"] = [
+                _sanitize_meta_finding(dict(item)) if isinstance(item, dict) else item
+                for item in data["findings"]
+            ]
         result = MetaAnalyzerResult.model_validate(data)
-        items = []
-        for f in result.findings:
-            d = _sanitize_meta_finding(f.model_dump())
-            d["_file"] = batch.file_path
-            items.append(d)
-        return items
-    except Exception as exc:
-        logger.warning(
-            "LLMMetaAnalyzer.parse_response: schema validation failed for %s: %s",
-            batch.file_label,
-            exc,
-        )
-        return []
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise _StructuredResponseValidationError from exc
+    items = []
+    for f in result.findings:
+        d = f.model_dump()
+        d["_file"] = batch.file_path
+        items.append(d)
+    return items
 
 
 # -- Patch 4: append JSON output format to base prompt ---------------------
@@ -336,12 +325,13 @@ def _verify_patch_targets() -> None:
         "LLMAnalyzerBase.__init__",
         1,
     )
-    _node_param = inspect.signature(LLMAnalyzerBase.__init__).parameters.get("node")
-    if _node_param is None or _node_param.kind != inspect.Parameter.KEYWORD_ONLY:
-        raise RuntimeError(
-            "Patch 1 target changed: LLMAnalyzerBase.__init__ must retain its "
-            "keyword-only 'node' parameter."
-        )
+    for name in ("node", "timeout"):
+        parameter = inspect.signature(LLMAnalyzerBase.__init__).parameters.get(name)
+        if parameter is None or parameter.kind != inspect.Parameter.KEYWORD_ONLY:
+            raise RuntimeError(
+                "Patch 1 target changed: LLMAnalyzerBase.__init__ must retain its "
+                f"keyword-only '{name}' parameter."
+            )
     if not hasattr(LLMAnalyzerBase, "response_schema"):
         raise RuntimeError(
             "Patch 1 target lost: LLMAnalyzerBase no longer has "
@@ -356,7 +346,7 @@ def _verify_patch_targets() -> None:
         "LLMAnalyzerBase.parse_response",
         2,
     )
-    # Deep deps (called inside try/except — silent degradation if broken):
+    # Validate dependencies before patching rather than failing during a scan:
     if not hasattr(LLMAnalysisResult, "model_validate"):
         raise RuntimeError(
             "Patch 2 deep dependency lost: LLMAnalysisResult.model_validate "
