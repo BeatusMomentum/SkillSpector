@@ -3372,12 +3372,19 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
             reason=LedgerReason.ARCHIVE_AMBIGUOUS_MEMBER_PATH,
         )
         event["message"] += (
-            f" Archive member {path!r} was not analyzed because it collides with a disk file."
+            f" Archive member file {path!r} was not analyzed because it collides with a disk file."
+            " Distinct descendant members may still be analyzed."
         )
         prework_events.append(event)
     for event in nested.ledger_events:
         path = event["path"]
         if path in reserved_paths:
+            # These reasons are emitted only for top-level disk inputs.
+            if path in nested.outer_metadata and event.get("reason_code") in {
+                LedgerReason.ARCHIVE_FORMAT_MISMATCH,
+                LedgerReason.ARCHIVE_MALFORMED,
+            }:
+                continue
             event["path"] = member_containers.get(path, path.rsplit("!/", 1)[0])
             event["work_id"] = inspection_work_id(
                 f"{event['record_type'].value}:{event['phase']}", event["path"], None, None

@@ -98,7 +98,10 @@ If a real disk path containing `!/` has the same identity as an archive member, 
 records `artifact_path_collision`, retains the disk bytes, and withholds the archive member.
 This fails the scan (CLI exit 2 and MCP `safe_to_install=false`). Rename the disk directory
 ending in `!` to remove the ambiguity. Non-colliding directory names ending in `!` remain valid.
-Archive exceptions for a withheld member are reported against its container.
+The colliding member file is withheld; distinct descendant members still receive analysis.
+Exceptions for that withheld file or a skipped duplicate descendant are reported against its
+archive container. Disk format and malformed-container errors stay on the disk file, and an
+analyzed disk descendant is not marked partial merely because the archive copy was skipped.
 
 ## SC9: Concealed Executable Artifact
 
