@@ -112,7 +112,7 @@ def test_malformed_oms_certificates_keep_findings_and_a_report(tmp_path, monkeyp
         )
         der = cert.public_bytes(Encoding.DER)
         with pytest.raises(x509.UnsupportedGeneralNameType):
-            x509.load_der_x509_certificate(der).extensions
+            _ = x509.load_der_x509_certificate(der).extensions
         entry["rawBytes"] = base64.b64encode(der).decode()
     else:
 
