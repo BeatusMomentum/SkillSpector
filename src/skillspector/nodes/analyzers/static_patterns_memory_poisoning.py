@@ -272,6 +272,21 @@ _CODE_FENCE_OPENER = re.compile(
 )
 _CODE_FENCE_MARKER = re.compile(r"[ \t]*(?:`{3,}|~{3,})")
 
+# Require a nominal state owned by a hardware subject, not just a nearby FSM label.
+_HARDWARE_RESET_STATE = re.compile(
+    r"\b(?:(?:finite[ \t-]+)?state[ \t-]+machines?|fsms?)[ \t]+"
+    r"(?:takes?|reach(?:es)?|enters?|returns?[ \t]+to)[ \t]+(?:its|their)[ \t]+"
+    r"(?P<target>reset[ \t]+state)\b",
+    re.IGNORECASE,
+)
+_HARDWARE_CLOCK = re.compile(r"\bclocks?\b", re.IGNORECASE)
+_HARDWARE_AGENT_REFERENCE = re.compile(
+    r"\b(?:you|your|agents?|assistants?|models?|llms?|bots?|conversation|memory|"
+    r"context|prompt|instructions?|directives?)\b"
+    r"|\bbefore[ \t]+(?:replying|responding|answering)\b",
+    re.IGNORECASE,
+)
+
 _LAYOUT_CHAR_RANGES = (
     (0x2500, 0x257F),
     (0x2580, 0x259F),
@@ -358,6 +373,45 @@ def _is_benign_reset_state_coverage(content: str, match: re.Match[str]) -> bool:
             return False
         return _PRECEDING_DIRECTIVE.search(previous_line) is None
     return False
+
+
+def _is_benign_hardware_reset_state(content: str, match: re.Match[str]) -> bool:
+    """Own only a clocked hardware subject's nominal reset state on a complete line."""
+    if re.fullmatch(r"reset[ \t]+state", match.group(), re.IGNORECASE) is None:
+        return False
+
+    window_start = max(0, match.start() - 512)
+    window_end = min(len(content), match.end() + 512)
+    preceding_breaks = list(LOGICAL_LINE_BREAK.finditer(content, window_start, match.start()))
+    line_start = preceding_breaks[-1].end() if preceding_breaks else window_start
+    following_break = LOGICAL_LINE_BREAK.search(content, match.end(), window_end)
+    line_end = following_break.start() if following_break else window_end
+    if (not preceding_breaks and window_start != 0) or (
+        following_break is None and window_end != len(content)
+    ):
+        return False
+
+    if _HARDWARE_CLOCK.search(content, line_start, line_end) is None:
+        return False
+    if not any(
+        candidate.span("target") == match.span()
+        for candidate in _HARDWARE_RESET_STATE.finditer(content, line_start, line_end)
+    ):
+        return False
+
+    _, previous_complete = _bounded_previous_nonblank_line(content, line_start)
+    _, next_complete = _bounded_next_nonblank_line(content, line_end)
+    if not previous_complete or not next_complete:
+        return False
+
+    surrounding = _normalize_timestamp_guard(
+        content[max(0, line_start - 512) : min(len(content), line_end + 512)]
+    )
+    # Preserve agent-state aliases and explicit instructions that reuse a description.
+    return (
+        _HARDWARE_AGENT_REFERENCE.search(surrounding) is None
+        and _TIMESTAMP_BACK_REFERENCE.search(surrounding) is None
+    )
 
 
 def _bounded_timestamp_following_context(content: str, offset: int) -> str | None:
@@ -571,9 +625,11 @@ def analyze(content: str, file_path: str, file_type: str) -> list[AnalyzerFindin
         for match in static_runner.iter_paragraph_matches(
             pattern, content, re.IGNORECASE | re.MULTILINE
         ):
-            if _is_benign_reset_state_coverage(
-                content, match
-            ) or _is_benign_timestamp_context_description(content, match):
+            if (
+                _is_benign_reset_state_coverage(content, match)
+                or _is_benign_hardware_reset_state(content, match)
+                or _is_benign_timestamp_context_description(content, match)
+            ):
                 continue
             line_num = get_line_number(content, match.start())
             context_text = ctx(match.start())
