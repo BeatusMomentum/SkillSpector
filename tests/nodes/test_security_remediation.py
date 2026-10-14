@@ -4050,7 +4050,8 @@ def test_short_credential_commands_survive_binary_projection(command: str, prefi
     assert any(finding.rule_id == "PE3" for finding in baseline)
     content = prefix + "\x00" + command + "\x00"
     state = {
-        "components": ["GUIDE"], "local_file_cache": {"GUIDE": content},
+        "components": ["GUIDE"],
+        "local_file_cache": {"GUIDE": content},
         "artifact_inventory": [classify_artifact("GUIDE", content.encode())],
     }
     findings = static_runner.run_static_patterns(state, [static_patterns_privilege_escalation])
