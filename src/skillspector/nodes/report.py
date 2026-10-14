@@ -38,7 +38,7 @@ from rich.table import Table
 
 from skillspector import __version__ as skillspector_version
 from skillspector.dependency_sources import redact_text
-from skillspector.inference_usage import sanitize_inference_usage
+from skillspector.inference_usage import looks_like_credential, sanitize_inference_usage
 from skillspector.inspection_ledger import (
     MAX_FINDING_OUTPUT_RECORDS,
     RULE_SET_SCOPE,
@@ -125,6 +125,18 @@ def _clean_text(value: str | None) -> str | None:
     if not isinstance(value, str):
         return value
     return _CONTROL_RE.sub("", _ANSI_RE.sub("", value))
+
+
+def redact_llm_error(value: object) -> str | None:
+    """Keep actionable provider error text without report-visible credentials."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    cleaned = redact_text(_clean_text(value) or "")
+    return re.sub(
+        r"(?i)(?:(?:authorization\s*:\s*)?(?:bearer|basic)\s+)?[A-Za-z0-9_+/.-]+={0,2}",
+        lambda match: "***" if looks_like_credential(match.group(0)) else match.group(0),
+        cleaned,
+    )
 
 
 def _sanitize_finding(finding: Finding) -> Finding:
@@ -1258,7 +1270,14 @@ def _build_metadata(
 ) -> dict[str, object]:
     """Build the metadata section shared by all output formats."""
     llm_call_log = llm_call_log or []
-    provider_available, llm_error = provider_availability or is_llm_available()
+    provider_available, llm_error = (
+        provider_availability
+        if provider_availability is not None
+        else is_llm_available()
+        if use_llm
+        else (False, None)
+    )
+    llm_error = redact_llm_error(llm_error)
     attempted, succeeded, call_log_degraded = _llm_runtime_status(use_llm, llm_call_log)
     # meta_analyzer's own record, independent of whether a DIFFERENT
     # LLM-backed node (a semantic_* analyzer) lost coverage to a dropped
@@ -1333,9 +1352,10 @@ def _build_metadata(
         meta["llm_calls_attempted"] = attempted
         meta["llm_calls_succeeded"] = succeeded
     if unavailable_before_execution:
+        detail = f" Reason: {llm_error}" if llm_error else ""
         meta["llm_error"] = (
             "LLM analysis was requested but unavailable during preflight; "
-            "results reflect static analysis only."
+            f"results reflect static analysis only.{detail}"
         )
     elif call_log_degraded:
         meta["llm_degraded"] = True
@@ -1368,6 +1388,43 @@ def _build_metadata(
         meta["transitive_truncated"] = True
         meta["transitive_truncation_reasons"] = list(transitive_truncation_reasons)
     return meta
+
+
+def _json_component(component: Mapping[str, object]) -> dict[str, object]:
+    """Preserve component identity and expose structured archive provenance."""
+    result = {
+        key: component.get(key)
+        for key in (
+            "path",
+            "type",
+            "lines",
+            "executable",
+            "size_bytes",
+            "source_url",
+            "source_identity",
+            "source_digest",
+        )
+    }
+    outer_path = component.get("outer_path")
+    nested_path = component.get("nested_path")
+    if (
+        isinstance(outer_path, str)
+        and outer_path
+        and isinstance(nested_path, str)
+        and nested_path
+        and component.get("path") == f"{outer_path}!/{nested_path}"
+    ):
+        result.update(outer_path=outer_path, nested_path=nested_path)
+        container_type = component.get("container_type")
+        if isinstance(container_type, str) and container_type:
+            result["container_type"] = container_type
+        depth = component.get("container_depth")
+        if isinstance(depth, int) and not isinstance(depth, bool) and depth > 0:
+            result["container_depth"] = depth
+        ancestry = component.get("container_ancestry")
+        if isinstance(ancestry, list) and all(isinstance(item, str) and item for item in ancestry):
+            result["container_ancestry"] = list(ancestry)
+    return result
 
 
 def _format_json(
@@ -1410,19 +1467,7 @@ def _format_json(
             "recommendation": risk_recommendation,
             "max_issue_severity": _max_issue_severity(findings),
         },
-        "components": [
-            {
-                "path": c.get("path"),
-                "type": c.get("type"),
-                "lines": c.get("lines"),
-                "executable": c.get("executable"),
-                "size_bytes": c.get("size_bytes"),
-                "source_url": c.get("source_url"),
-                "source_identity": c.get("source_identity"),
-                "source_digest": c.get("source_digest"),
-            }
-            for c in component_metadata
-        ],
+        "components": [_json_component(component) for component in component_metadata],
         "structured_summaries": structured_summaries or [],
         "issues": [f.to_dict() for f in findings],
         "suppressed_count": len(suppressed),
@@ -1775,7 +1820,12 @@ def report(state: SkillspectorState) -> dict[str, object]:
             analysis_completeness["status"] = "partial"
     _attempted, _succeeded, degraded = _llm_runtime_status(llm_requested, llm_call_log)
     remaining = transitive_remaining_seconds(state)
-    if remaining is not None and remaining <= 0:
+    if not llm_requested:
+        provider_available, provider_error = False, None
+    elif not use_llm and "llm_preflight_error" in state:
+        provider_available = False
+        provider_error = redact_llm_error(state.get("llm_preflight_error"))
+    elif remaining is not None and remaining <= 0:
         provider_available = any(successful_llm_record(record) for record in llm_call_log)
         provider_error = (
             None
