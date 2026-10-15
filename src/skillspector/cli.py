@@ -85,6 +85,7 @@ from skillspector.suppression import (
     load_baseline,
     source_content_key,
 )
+from skillspector.terminal_text import visible_terminal_text as _visible_terminal_text
 
 logger = get_logger(__name__)
 
@@ -353,6 +354,17 @@ def _result_body(result: dict) -> str:
     return report_body
 
 
+def _validate_report_destination(input_path: Path, output: Path | None) -> None:
+    """Reject reports that would overwrite an input, including path aliases."""
+    if (
+        output is not None
+        and input_path.is_file()
+        and output.exists()
+        and output.samefile(input_path)
+    ):
+        raise ValueError("--output points to the input file. Choose a different output path.")
+
+
 def _write_result(
     result: dict[str, object],
     output: Path | None,
@@ -368,7 +380,7 @@ def _write_result(
             console.print(f"Report saved to: {output}")
     else:
         if format == FormatChoice.terminal:
-            console.print(report_body, markup=False)
+            console.print(report_body, markup=False, emoji=False)
         else:
             print(report_body)
 
@@ -698,6 +710,9 @@ def scan(
             )
             raise typer.Exit(code=2)
         try:
+            _validate_report_destination(Path(input_path), output)
+            if mcp_registry_compare is not None:
+                _validate_report_destination(mcp_registry_compare, output)
             result = (
                 scan_registry(input_path, compare_path=mcp_registry_compare)
                 if mcp_registry_compare is not None
@@ -727,15 +742,7 @@ def scan(
     if not input_path.startswith(("http://", "https://", "git@")):
         try:
             resolved_path = validate_local_input_path(resolved_path)
-            if (
-                output is not None
-                and resolved_path.is_file()
-                and output.exists()
-                and output.samefile(resolved_path)
-            ):
-                raise ValueError(
-                    "--output points to the input file. Choose a different output path."
-                )
+            _validate_report_destination(resolved_path, output)
         except (OSError, ValueError) as e:
             err_console.print(f"[red]Error:[/red] {e}")
             raise typer.Exit(code=2) from e
@@ -1482,23 +1489,6 @@ def _cache_transitive_result(
         meta_review_required=child_result.get("meta_review_required") is True,
         refs=extraction.references,
     )
-
-
-def _visible_terminal_text(value: str) -> str:
-    """Render untrusted path text without passing terminal control characters."""
-    visible: list[str] = []
-    for character in value:
-        if character.isprintable():
-            visible.append(character)
-            continue
-        codepoint = ord(character)
-        if codepoint <= 0xFF:
-            visible.append(f"\\x{codepoint:02x}")
-        elif codepoint <= 0xFFFF:
-            visible.append(f"\\u{codepoint:04x}")
-        else:
-            visible.append(f"\\U{codepoint:08x}")
-    return "".join(visible)
 
 
 def _discovered_files_tree(paths: list[str]) -> Tree:
@@ -3350,7 +3340,7 @@ def _scan_multi_skill(
             Path(output).write_text(rendered, encoding="utf-8")
             progress_console.print(f"[green]Combined report saved to:[/green] {output}")
         elif format is FormatChoice.terminal:
-            console.print(rendered)
+            console.print(rendered, markup=False, emoji=False)
         else:
             sys.stdout.write(rendered)
 
