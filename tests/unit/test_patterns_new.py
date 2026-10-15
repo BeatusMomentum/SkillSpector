@@ -2776,10 +2776,31 @@ class TestSupplyChainShellDecoding:
             'alias "sha256sum"=sh',
             "alias -- sha256sum=sh",
             "alias x=y sha256sum=sh",
+            r"alias sha256su\m=sh",
+            r"a\lias sha256su\m=sh",
+            "a'li'as sha256su'm'=sh",
+            "alias x=y sha'256'sum=sh",
         ],
     )
     def test_shadowed_checksum_keeps_decoded_sc2(self, override: str) -> None:
         content = override + f"\necho {_SHELL_FETCH_B64} | base64 -d | sha256sum\n"
+
+        findings = sc_mod.analyze(content, "setup.sh", "shell")
+
+        assert any(f.rule_id == "SC2" and f.matched_text == _SHELL_FETCH for f in findings)
+
+    @pytest.mark.parametrize(
+        "setup",
+        [
+            "eval setup",
+            "source aliases.sh",
+            ". aliases.sh",
+            "helper() { :; }",
+            "printf 'unclosed",
+        ],
+    )
+    def test_uncertain_command_identity_keeps_decoded_sc2(self, setup: str) -> None:
+        content = setup + f"\necho {_SHELL_FETCH_B64} | base64 -d | sha256sum\n"
 
         findings = sc_mod.analyze(content, "setup.sh", "shell")
 
@@ -2798,13 +2819,13 @@ class TestSupplyChainShellDecoding:
         assert not any(f.rule_id == "SC2" for f in findings)
 
     @pytest.mark.parametrize("wrapper", ['eval "$(%s)"', "eval `%s`", "bash <(%s)"])
-    def test_execution_substitution_keeps_data_only_literal_out_of_sc2(self, wrapper: str) -> None:
+    def test_execution_substitution_keeps_conservative_decoded_sc2(self, wrapper: str) -> None:
         body = f"echo {_SHELL_FETCH_B64} | base64 -d | sha256sum; echo ZWNobyBoZWxsbwo= | base64 -d"
 
         findings = sc_mod.analyze(wrapper % body, "setup.sh", "shell")
 
         assert any(f.rule_id == "SC3" for f in findings)
-        assert not any(f.rule_id == "SC2" for f in findings)
+        assert any(f.rule_id == "SC2" and f.matched_text == _SHELL_FETCH for f in findings)
 
     @pytest.mark.parametrize(
         "command",
@@ -2964,6 +2985,12 @@ class TestSupplyChainShellDecoding:
                 {"SC2"},
                 id="newline_ends_stage",
             ),
+            pytest.param(
+                r"a\lias sha256su\m=sh; "
+                f"echo {_SHELL_FETCH_B64} | base64 -d | sha256sum",
+                {"SC2"},
+                id="fragmented_alias",
+            ),
         ],
     )
     def test_shell_decode_in_hook_config(self, command: str, expected: set[str]) -> None:
@@ -3034,6 +3061,10 @@ class TestSupplyChainShellDecoding:
         "content",
         [
             pytest.param("echo QUFB | base64 -d " * 12_000, id="decoders_without_sink"),
+            pytest.param(
+                f"echo {_SHELL_FETCH_B64} | base64 -d | sha256sum\n" * 2_000,
+                id="repeated_checksum_pipelines",
+            ),
             pytest.param("eval $(echo " * 20_000 + "base64 -d", id="unclosed_substitutions"),
             pytest.param("eval $(" + "a " * 128_000 + "base64 -d", id="long_substitution"),
             pytest.param("echo " + "A" * 256_000 + " | base64 -d | sh", id="long_literal"),

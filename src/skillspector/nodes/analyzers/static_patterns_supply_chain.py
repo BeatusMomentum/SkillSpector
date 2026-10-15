@@ -334,11 +334,6 @@ _SC3_DECODED_DATA_SINK = re.compile(
     r"(?:[ \t]{1,16}-[A-Za-z0-9-]{1,16}){0,4}[ \t]{0,16}"
     r"\|(?!\|)&?[ \t]{0,16}sha256sum(?=$|[\s;&|)`])"
 )
-_SC3_CHECKSUM_OVERRIDE = re.compile(
-    r"\bfunction[ \t]++['\"]?sha256sum\b"
-    r"|(?<![\w.-])['\"]?sha256sum['\"]?[ \t]*+\([ \t]*+\)"
-    r"|(?<![\w.-])['\"]?sha256sum['\"]?="
-)
 
 
 def _decoded_shell_literal_payloads(content: str) -> list[tuple[int, str]]:
@@ -346,21 +341,29 @@ def _decoded_shell_literal_payloads(content: str) -> list[tuple[int, str]]:
 
     Only an inline echo/printf argument or a here-string is decoded, as base64,
     base32 or (for xxd) hex; an ``openssl enc`` cipher is not applied.
-    Direct checksum consumers without a local override are data-only; other
-    output flows remain conservative because a saved payload can be executed later.
+    Direct checksum consumers are exempt only in a simple shell context without
+    alias, function or dynamic-command syntax. Other flows remain conservative
+    because a saved payload can be executed later.
     Variables, files and downloads stay opaque. Invalid UTF-8 becomes U+FFFD,
     so a stray byte cannot hide the command. Returns ``(offset, text)`` pairs
     in source order.
     """
-    checksum_overridden = _SC3_CHECKSUM_OVERRIDE.search(content) is not None
+    checksum_exemption_allowed: bool | None = None
     decoded: list[tuple[int, str]] = []
     for pattern in (_SC3_PIPED_LITERAL, _SC3_HERE_STRING_LITERAL):
         for match in pattern.finditer(content):
-            if (
-                not checksum_overridden
-                and _SC3_DECODED_DATA_SINK.match(content, match.end()) is not None
-            ):
-                continue
+            if _SC3_DECODED_DATA_SINK.match(content, match.end()) is not None:
+                if checksum_exemption_allowed is None:
+                    # Normalize once: escaped or quoted words can still configure aliases.
+                    tokens = _shell_tokens(content)
+                    checksum_exemption_allowed = tokens is not None and not any(
+                        token in {"alias", "function", "eval", "source", "."}
+                        or token.startswith("sha256sum=")
+                        or any(character.isspace() or character in "()" for character in token)
+                        for token in tokens
+                    )
+                if checksum_exemption_allowed:
+                    continue
             literal = match.group("literal")
             decoder = match.group("decoder").lower()
             try:
