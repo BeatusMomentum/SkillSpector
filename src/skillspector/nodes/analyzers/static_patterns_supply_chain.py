@@ -334,57 +334,31 @@ _SC3_DECODED_DATA_SINK = re.compile(
     r"(?:[ \t]{1,16}-[A-Za-z0-9-]{1,16}){0,4}[ \t]{0,16}"
     r"\|(?!\|)&?[ \t]{0,16}sha256sum(?=$|[\s;&|)`])"
 )
+_SC3_CHECKSUM_OVERRIDE = re.compile(
+    r"\bfunction[ \t]++['\"]?sha256sum\b"
+    r"|(?<![\w.-])['\"]?sha256sum['\"]?[ \t]*+\([ \t]*+\)"
+    r"|(?<![\w.-])['\"]?sha256sum['\"]?="
+)
 
 
 def _decoded_shell_literal_payloads(content: str) -> list[tuple[int, str]]:
-    """Decode literal payloads whose decoder output reaches an executor.
+    """Decode literal payloads fed to a shell decoder.
 
     Only an inline echo/printf argument or a here-string is decoded, as base64,
     base32 or (for xxd) hex; an ``openssl enc`` cipher is not applied.
+    Direct checksum consumers without a local override are data-only; other
+    output flows remain conservative because a saved payload can be executed later.
     Variables, files and downloads stay opaque. Invalid UTF-8 becomes U+FFFD,
     so a stray byte cannot hide the command. Returns ``(offset, text)`` pairs
     in source order.
     """
-    if not any(
-        pattern.search(content) for pattern in (_SC3_PIPED_LITERAL, _SC3_HERE_STRING_LITERAL)
-    ):
-        return []
-    pipeline_executor = re.compile(SC3_SHELL_PATTERNS[0][0], re.IGNORECASE | re.MULTILINE)
-    substitution_ranges: list[tuple[int, int]] = []
-    substitution_ends: dict[int, int | None] = {}
-    backtick_ends: dict[int, int | None] = {}
-    for executor in re.finditer(_SC3_SUBSTITUTION_EXECUTOR, content, re.MULTILINE):
-        backtick = content[executor.end() - 1] == "`"
-        start = executor.end() - (1 if backtick else 2)
-        limit = min(len(content), start + _MAX_SHELL_LITERAL_CHARS)
-        skip = _skip_backtick_substitution if backtick else _skip_command_substitution
-        end = skip(
-            content,
-            start,
-            limit,
-            end_cache=backtick_ends if backtick else substitution_ends,
-        )
-        # The parse limit cannot prove later decoder output is outside this wrapper.
-        body_end = len(content) if end is None else end - 1
-        if substitution_ranges and executor.end() <= substitution_ranges[-1][1]:
-            previous_start, previous_end = substitution_ranges[-1]
-            substitution_ranges[-1] = (previous_start, max(previous_end, body_end))
-        else:
-            substitution_ranges.append((executor.end(), body_end))
-        if end is None:
-            break
-    substitution_starts = [start for start, _ in substitution_ranges]
+    checksum_overridden = _SC3_CHECKSUM_OVERRIDE.search(content) is not None
     decoded: list[tuple[int, str]] = []
     for pattern in (_SC3_PIPED_LITERAL, _SC3_HERE_STRING_LITERAL):
         for match in pattern.finditer(content):
-            decoder_start = match.start("decoder")
-            index = bisect_right(substitution_starts, decoder_start) - 1
-            in_execution_substitution = index >= 0 and decoder_start < substitution_ranges[index][1]
-            if _SC3_DECODED_DATA_SINK.match(content, match.end()) is not None:
-                continue
             if (
-                not in_execution_substitution
-                and pipeline_executor.match(content, decoder_start) is None
+                not checksum_overridden
+                and _SC3_DECODED_DATA_SINK.match(content, match.end()) is not None
             ):
                 continue
             literal = match.group("literal")
