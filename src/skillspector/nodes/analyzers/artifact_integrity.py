@@ -1095,7 +1095,10 @@ def node(state: SkillspectorState) -> AnalyzerNodeResponse:
                                 line=first_nul_line,
                             )
                         )
-                    if format_density >= 0.01 or mixed_script:
+                    # Compressed binary bytes can resemble mixed-script Unicode text.
+                    if not artifact.get("readable_binary") and (
+                        format_density >= 0.01 or mixed_script
+                    ):
                         budget.emit(
                             _finding(
                                 "AE4",

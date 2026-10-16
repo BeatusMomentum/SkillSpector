@@ -2328,7 +2328,7 @@ def _scan_all_views_detailed(
         ]
         if not modules:
             return [], None, {}
-        view, truncated = binary_instruction_view(content)
+        view, _ = binary_instruction_view(content)
         findings, reason, metrics = _scan_all_views_detailed(
             path,
             view.text,
@@ -2360,8 +2360,7 @@ def _scan_all_views_detailed(
             view=view,
             source_line_starts=logical_line_starts(content),
         )
-        if truncated and reason is None:
-            reason = LedgerReason.SIZE_LIMIT
+        # Projection scope is recorded by build_context; actual scan limits remain partial.
         return findings, reason, metrics
     ast_modules = [module for module in pattern_modules if _uses_python_ast(module)]
     lexical_modules = [module for module in pattern_modules if not _uses_python_ast(module)]

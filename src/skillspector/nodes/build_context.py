@@ -3677,7 +3677,7 @@ def build_context(state: SkillspectorState) -> dict[str, object]:
         ):
             continue
         _, projection_truncated = binary_instruction_view(local_file_cache.get(path, ""))
-        partial = bool(artifact.get("referenced")) or projection_truncated
+        partial = bool(artifact.get("referenced"))
         reason = LedgerReason.SIZE_LIMIT if projection_truncated else LedgerReason.OPAQUE_CONTENT
         if artifact["disposition"] == ArtifactDisposition.ANALYZED:
             artifact["disposition"] = (
