@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Iterator
 
 from skillspector.logging_config import get_logger
 from skillspector.models import AnalyzerFinding, Location, Severity
@@ -34,6 +35,7 @@ from skillspector.state import AnalyzerNodeResponse, SkillspectorState
 from . import static_runner
 from .common import LOGICAL_LINE_BREAK, get_context, get_line_number
 from .pattern_defaults import PatternCategory
+from .prohibition_context import is_directly_prohibited
 
 logger = get_logger(__name__)
 
@@ -111,8 +113,40 @@ MP2_PROSE_PATTERNS = [
 ]
 MP2_PATTERNS = MP2_CONTENT_PATTERNS + MP2_PROSE_PATTERNS
 
+# Report explicit state adoption at the instruction, even when its source
+# is a separate linked document with an otherwise benign hardware state.
+# The bounded gap accepts a wrapped reference and dots inside link paths,
+# but cannot borrow the target from a later sentence or paragraph. Bounded
+# inline decorators keep the original source span and cannot hide an action.
+_ADOPTION_MARKUP = r"[*_`]{0,3}"
+_ADOPTION_DIALOGUE = (
+    rf"(?:conversation|chat|dialogue){_ADOPTION_MARKUP}"
+    rf"(?:\s+{_ADOPTION_MARKUP}(?:state|history|context|transcript))?"
+)
+_ADOPTION_ACTION_SOURCE = (
+    rf"(?<!\w){_ADOPTION_MARKUP}(?:treat|consider|regard|use|adopt){_ADOPTION_MARKUP}\s+"
+    rf"(?:(?:the|this|that){_ADOPTION_MARKUP}\s+)?"
+    rf"(?:\[\s*)?{_ADOPTION_MARKUP}(?:reset\s+)?state{_ADOPTION_MARKUP}(?!\w)"
+)
+_MP3_STATE_ADOPTION_PATTERN = (
+    _ADOPTION_ACTION_SOURCE
+    # A later adoption action owns its own target and prohibition context.
+    + rf"(?:(?!{_ADOPTION_ACTION_SOURCE})(?:[^.!?]|\.(?=\S))){{0,512}}?\bas\s+"
+    rf"{_ADOPTION_MARKUP}(?:your{_ADOPTION_MARKUP}\s+{_ADOPTION_MARKUP}"
+    rf"(?:{_ADOPTION_DIALOGUE}|memory)"
+    rf"|(?:the{_ADOPTION_MARKUP}\s+)?{_ADOPTION_MARKUP}"
+    rf"(?:agent|assistant|llm|(?:ai|language)\s+model)(?:'s|’s){_ADOPTION_MARKUP}\s+"
+    rf"{_ADOPTION_MARKUP}(?:{_ADOPTION_DIALOGUE}|memory|context|state|history|transcript))"
+    rf"{_ADOPTION_MARKUP}(?!\w)(?:[.!?][*_`]{{1,3}})?"
+)
+_ADOPTION_PARAGRAPH_BOUNDARY = re.compile(
+    rf"(?>{LOGICAL_LINE_BREAK.pattern})[ \t]*(?:>[ \t]*)*"
+    rf"(?>{LOGICAL_LINE_BREAK.pattern})"
+)
+
 # MP3: Memory Manipulation — direct modification of agent memory/state
 MP3_PATTERNS = [
+    (_MP3_STATE_ADOPTION_PATTERN, 0.85),
     (
         r"(?:clear|reset|wipe|erase|delete|purge)\s+(?:your\s+)?(?:memory|context|state|history|conversation)",
         0.8,
@@ -293,6 +327,16 @@ _LAYOUT_CHAR_RANGES = (
 )
 _LAYOUT_ASCII_CHARS = frozenset("|-_=+")
 _MAX_LAYOUT_ONLY_SPAN = 256
+
+
+def _iter_state_adoption_matches(content: str) -> Iterator[re.Match[str]]:
+    """Keep adoption and its target in one paragraph, including blockquote blanks."""
+    pattern = re.compile(_MP3_STATE_ADOPTION_PATTERN, re.IGNORECASE | re.MULTILINE)
+    start = 0
+    for boundary in _ADOPTION_PARAGRAPH_BOUNDARY.finditer(content):
+        yield from pattern.finditer(content, start, boundary.start())
+        start = boundary.end()
+    yield from pattern.finditer(content, start)
 
 
 def _is_layout_only_span(span: str, max_cosmetic_span: int = _MAX_LAYOUT_ONLY_SPAN) -> bool:
@@ -622,9 +666,18 @@ def analyze(content: str, file_path: str, file_type: str) -> list[AnalyzerFindin
                 )
             )
     for pattern, confidence in MP3_PATTERNS:
-        for match in static_runner.iter_paragraph_matches(
-            pattern, content, re.IGNORECASE | re.MULTILINE
-        ):
+        mp3_matches = (
+            _iter_state_adoption_matches(content)
+            if pattern == _MP3_STATE_ADOPTION_PATTERN
+            else static_runner.iter_paragraph_matches(
+                pattern, content, re.IGNORECASE | re.MULTILINE
+            )
+        )
+        for match in mp3_matches:
+            if pattern == _MP3_STATE_ADOPTION_PATTERN and is_directly_prohibited(
+                content, match.start(), match.end(), allow_clause_prefix=True
+            ):
+                continue
             if (
                 _is_benign_reset_state_coverage(content, match)
                 or _is_benign_hardware_reset_state(content, match)
