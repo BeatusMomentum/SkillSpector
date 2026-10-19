@@ -1909,6 +1909,200 @@ guidance = "Set the flag to --no-verify to skip deterministic result verificatio
         assert any(f.rule_id == "TM3" for f in tm_mod.analyze(content, filename, filetype))
 
     @pytest.mark.parametrize(
+        "content,filename,filetype,expected",
+        [
+            pytest.param("mode = 0o777", "fs.py", "python", "mode = 0o777", id="mode_777"),
+            pytest.param(
+                "permission = 0o666", "fs.py", "python", "permission = 0o666", id="permission_666"
+            ),
+            pytest.param(
+                "mode = 0o777 & ~umask | 0o777",
+                "fs.py",
+                "python",
+                "mode = 0o777",
+                id="bits_added_after_umask_mask",
+            ),
+            pytest.param(
+                "mode = 0o777 & ~0", "fs.py", "python", "mode = 0o777", id="mask_is_not_the_umask"
+            ),
+            pytest.param("umask 000", "run.sh", "shell", "umask 000", id="shell_umask_000"),
+            pytest.param("UMASK=0000", "env.sh", "shell", "UMASK=0000", id="env_umask_0000"),
+            pytest.param("umask = 0o000", "cfg.py", "python", "umask = 0o000", id="assign_0o000"),
+            pytest.param("umask 004", "run.sh", "shell", "umask 004", id="world_write_unmasked"),
+            pytest.param(
+                "umask=0o7770", "cfg.py", "python", "umask=0o7770", id="long_value_ending_in_0"
+            ),
+            pytest.param("os.umask(0)", "fs.py", "python", "os.umask(0)", id="py_umask_call"),
+            pytest.param(
+                "process.umask(0o000);", "fs.js", "javascript", "process.umask(0o000)", id="js_call"
+            ),
+            pytest.param("umask(0);", "main.c", "c", "umask(0)", id="c_umask_call"),
+            pytest.param(
+                "fd = os.open(p, flags, mode=0o666 & ~os.umask(0))",
+                "fs.py",
+                "python",
+                "os.umask(0)",
+                id="umask_zero_inside_mask_expression",
+            ),
+            pytest.param(
+                "mode = 0o666 & ~current_umask // 512",
+                "fs.py",
+                "python",
+                "mode = 0o666",
+                id="floor_division_after_umask_mask",
+            ),
+            pytest.param(
+                "os.chmod(path, mode=0o666 & ~umask\n         | 0o666)",
+                "fs.py",
+                "python",
+                "mode=0o666",
+                id="bits_added_on_continued_line",
+            ),
+            pytest.param(
+                "os.chmod(path, mode=0o666 & ~umask\r\n         | 0o666)",
+                "fs.py",
+                "python",
+                "mode=0o666",
+                id="bits_added_on_continued_crlf_line",
+            ),
+            pytest.param(
+                "os.chmod(path, mode=0o666 & ~umask  # keep the umask\n         | 0o666)",
+                "fs.py",
+                "python",
+                "mode=0o666",
+                id="bits_added_after_comment_line",
+            ),
+            pytest.param(
+                "os.chmod(path, mode=0o666 & ~umask\n         or 0o777)",
+                "fs.py",
+                "python",
+                "mode=0o666",
+                id="or_on_continued_line",
+            ),
+            pytest.param(
+                "changed = old == os.umask(0)",
+                "fs.py",
+                "python",
+                "os.umask(0)",
+                id="umask_call_compared_not_assigned",
+            ),
+            pytest.param("umask = 8", "cfg.py", "python", "umask = 8", id="decimal_8_is_0o010"),
+            pytest.param("os.umask(8)", "fs.py", "python", "os.umask(8)", id="decimal_call_0o010"),
+            pytest.param("umask 14", "run.sh", "shell", "umask 14", id="shell_umask_is_octal"),
+            pytest.param("UMASK=14", "env.sh", "shell", "UMASK=14", id="shell_variable_is_octal"),
+        ],
+    )
+    def test_tm3_world_writable_mode_or_umask_detected(
+        self, content: str, filename: str, filetype: str, expected: str
+    ) -> None:
+        """A world-writable mode, or a umask that leaves world-write unmasked, is TM3."""
+        findings = tm_mod.analyze(content, filename, filetype)
+        assert [f.matched_text for f in findings if f.rule_id == "TM3"] == [expected]
+
+    @pytest.mark.parametrize(
+        "content,filename,filetype",
+        [
+            pytest.param("mode = 0o666 & ~umask", "fs.py", "python", id="mode_masked_by_umask"),
+            pytest.param(
+                "os.chmod(path, mode=0o777 & ~current_umask)",
+                "fs.py",
+                "python",
+                id="mode_masked_in_call",
+            ),
+            pytest.param(
+                "const mode = 0o666 & ~process.umask();",
+                "fs.js",
+                "javascript",
+                id="mode_masked_by_process_umask",
+            ),
+            pytest.param("umask = 0o777", "cfg.py", "python", id="most_restrictive_umask"),
+            pytest.param("UMASK=0777", "env.sh", "shell", id="restrictive_env_umask"),
+            pytest.param("umask 077", "run.sh", "shell", id="umask_077"),
+            pytest.param("umask 022", "run.sh", "shell", id="umask_022"),
+            pytest.param("os.umask(0o022)", "fs.py", "python", id="umask_call_022"),
+            pytest.param("os.umask(18)", "fs.py", "python", id="decimal_umask_call_022"),
+            pytest.param(
+                "umask = os.umask(0)\nos.umask(umask)\nos.chmod(tmp, 0o666 & ~umask)",
+                "fs.py",
+                "python",
+                id="read_and_restore_umask",
+            ),
+            pytest.param(
+                "const previous = process.umask(0);", "fs.js", "javascript", id="js_read_umask"
+            ),
+            pytest.param(
+                "mode = 0o666 & ~umask\r\nfd = os.open(path, flags, mode)\r\n",
+                "fs.py",
+                "python",
+                id="mode_masked_by_umask_crlf",
+            ),
+            pytest.param(
+                "mode = 0o666 & ~umask  # respect the umask\nfd = os.open(path, flags, mode)\n",
+                "fs.py",
+                "python",
+                id="mode_masked_by_umask_with_comment",
+            ),
+            pytest.param(
+                "mode = 0o666 & ~umask  # respect the umask\r\nif exists:\r\n    pass\r\n",
+                "fs.py",
+                "python",
+                id="mode_masked_by_umask_with_comment_crlf",
+            ),
+            pytest.param(
+                "os.chmod(path, mode=0o666 & ~umask\n         )",
+                "fs.py",
+                "python",
+                id="mask_ends_before_closing_line",
+            ),
+            pytest.param(
+                "old =  os.umask(0)\nos.umask(old)", "fs.py", "python", id="read_umask_two_spaces"
+            ),
+            pytest.param(
+                "old =\tos.umask(0)\nos.umask(old)", "fs.py", "python", id="read_umask_tab"
+            ),
+            pytest.param(
+                "old = (os.umask(0))\nos.umask(old)",
+                "fs.py",
+                "python",
+                id="read_umask_parenthesized",
+            ),
+            pytest.param("umask = 14", "cfg.py", "python", id="decimal_14_is_0o016"),
+        ],
+    )
+    def test_tm3_umask_masked_mode_or_restrictive_umask_not_flagged(
+        self, content: str, filename: str, filetype: str
+    ) -> None:
+        """A mode masked with the umask and a restrictive umask are not unsafe defaults."""
+        findings = tm_mod.analyze(content, filename, filetype)
+        assert not [f.matched_text for f in findings if f.rule_id == "TM3"]
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param("mode=0o777 & ~" + "a" * 50_000, id="long_mask_operand"),
+            pytest.param("mode=0o777 &" + " " * 50_000 + "~umask |", id="long_gap_before_mask"),
+            pytest.param("mode=0o777 & ~os.umask(" + "0" * 50_000, id="unclosed_mask_call"),
+            pytest.param("umask " + "0" * 50_000 + "2", id="long_umask_value"),
+            pytest.param("umask(0" + "0" * 50_000, id="unclosed_umask_call"),
+            pytest.param("a." * 25_000 + "umask(", id="long_dotted_name"),
+            pytest.param("umask umask " * 4_000, id="repeated_umask_words"),
+            pytest.param("old =" + " " * 50_000 + "os.umask(0)", id="long_gap_after_assignment"),
+            pytest.param("(" * 50_000 + "os.umask(0)", id="long_paren_run_before_call"),
+            pytest.param("old = (os.umask(0))\n" * 10_000, id="repeated_assigned_umask_calls"),
+            pytest.param("umask = 1" + "0" * 50_000 + "4", id="long_decimal_umask"),
+            pytest.param(
+                "mode=0o777 & ~umask\n" + " " * 50_000 + "|", id="long_indent_on_continued_line"
+            ),
+            pytest.param("mode=0o777 & ~umask #" + "c" * 50_000, id="long_comment_after_mask"),
+            pytest.param("mode=0o777 & ~umask # c\n" * 5_000, id="repeated_commented_masks"),
+        ],
+    )
+    def test_tm3_permission_patterns_are_linear(self, content: str) -> None:
+        started = time.perf_counter()
+        tm_mod.analyze(content, "fs.py", "python")
+        assert time.perf_counter() - started < 1.0
+
+    @pytest.mark.parametrize(
         "content,filename,filetype",
         [
             pytest.param(
@@ -2666,6 +2860,92 @@ class TestSupplyChainShellDecoding:
     @pytest.mark.parametrize(
         "command",
         [
+            pytest.param(f"echo {_SHELL_FETCH_B64} | base64 -d | sha256sum", id="base64"),
+            pytest.param(f"echo {_SHELL_FETCH_B32} | base32 -d | sha256sum", id="base32"),
+            pytest.param(f"echo {_SHELL_FETCH_HEX} | xxd -r -p | sha256sum", id="hex"),
+            pytest.param(
+                f"echo {_SHELL_FETCH_B64} | openssl base64 -d -A | sha256sum", id="openssl"
+            ),
+            pytest.param(f"base64 -d <<< '{_SHELL_FETCH_B64}' | sha256sum", id="here_string"),
+        ],
+    )
+    def test_checksum_only_literal_is_not_sc2_or_sc3(self, command: str) -> None:
+        findings = sc_mod.analyze(command + "\n", "setup.sh", "shell")
+
+        assert not [f for f in findings if f.rule_id in {"SC2", "SC3"}]
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            "sha256sum() { sh; }",
+            "sha256sum ( ) { sh; }",
+            "sha256sum" + " " * 17 + "() { sh; }",
+            "function sha256sum { sh; }",
+            "function sha256sum() { sh; }",
+            "function" + " " * 30 + "sha256sum { sh; }",
+            "'sha256sum'() { sh; }",
+            "alias sha256sum=sh",
+            "alias" + " " * 24 + "sha256sum=sh",
+            "alias 'sha256sum=sh'",
+            'alias "sha256sum=sh"',
+            "alias 'sha256sum'=sh",
+            'alias "sha256sum"=sh',
+            "alias -- sha256sum=sh",
+            "alias x=y sha256sum=sh",
+            r"alias sha256su\m=sh",
+            r"a\lias sha256su\m=sh",
+            "a'li'as sha256su'm'=sh",
+            "alias x=y sha'256'sum=sh",
+        ],
+    )
+    def test_shadowed_checksum_keeps_decoded_sc2(self, override: str) -> None:
+        content = override + f"\necho {_SHELL_FETCH_B64} | base64 -d | sha256sum\n"
+
+        findings = sc_mod.analyze(content, "setup.sh", "shell")
+
+        assert any(f.rule_id == "SC2" and f.matched_text == _SHELL_FETCH for f in findings)
+
+    @pytest.mark.parametrize(
+        "setup",
+        [
+            "eval setup",
+            "source aliases.sh",
+            ". aliases.sh",
+            "helper() { :; }",
+            "printf 'unclosed",
+        ],
+    )
+    def test_uncertain_command_identity_keeps_decoded_sc2(self, setup: str) -> None:
+        content = setup + f"\necho {_SHELL_FETCH_B64} | base64 -d | sha256sum\n"
+
+        findings = sc_mod.analyze(content, "setup.sh", "shell")
+
+        assert any(f.rule_id == "SC2" and f.matched_text == _SHELL_FETCH for f in findings)
+
+    @pytest.mark.parametrize("separator", ["\n", "; ", " && "])
+    @pytest.mark.parametrize("data_first", [True, False])
+    def test_only_executed_literal_produces_sc2(self, separator: str, data_first: bool) -> None:
+        data = f"echo {_SHELL_FETCH_B64} | base64 -d | sha256sum"
+        executed = "echo ZWNobyBoZWxsbw== | base64 -d | sh"
+        commands = [data, executed] if data_first else [executed, data]
+
+        findings = sc_mod.analyze(separator.join(commands), "setup.sh", "shell")
+
+        assert any(f.rule_id == "SC3" for f in findings)
+        assert not any(f.rule_id == "SC2" for f in findings)
+
+    @pytest.mark.parametrize("wrapper", ['eval "$(%s)"', "eval `%s`", "bash <(%s)"])
+    def test_execution_substitution_keeps_conservative_decoded_sc2(self, wrapper: str) -> None:
+        body = f"echo {_SHELL_FETCH_B64} | base64 -d | sha256sum; echo ZWNobyBoZWxsbwo= | base64 -d"
+
+        findings = sc_mod.analyze(wrapper % body, "setup.sh", "shell")
+
+        assert any(f.rule_id == "SC3" for f in findings)
+        assert any(f.rule_id == "SC2" and f.matched_text == _SHELL_FETCH for f in findings)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
             pytest.param(f"echo {_SHELL_FETCH_B64} | base64 -d | sh", id="echo_base64"),
             pytest.param(
                 f"printf '%s' '{_SHELL_FETCH_B64.rstrip('=')}' | base64 --decode | bash",
@@ -2677,6 +2957,55 @@ class TestSupplyChainShellDecoding:
             pytest.param(f"echo {_SHELL_FETCH_HEX} | xxd -r -p | sh", id="echo_hex"),
             pytest.param(f"sh <(xxd -r -p <<< {_SHELL_FETCH_HEX})", id="here_string_hex"),
             pytest.param(f"echo -n {_SHELL_FETCH_B64} | openssl base64 -d -A | sh", id="openssl"),
+            pytest.param(f'eval "$(echo {_SHELL_FETCH_B64} | base64 -d)"', id="eval"),
+            pytest.param(f"eval `echo {_SHELL_FETCH_B64} | base64 -d`", id="eval_backticks"),
+            pytest.param(f'bash -c "$(echo {_SHELL_FETCH_B64} | base64 -d)"', id="bash_c"),
+            pytest.param(f"source <(base64 -d <<< '{_SHELL_FETCH_B64}')", id="source"),
+            pytest.param(f"bash < <(echo {_SHELL_FETCH_B64} | base64 -d)", id="redirected_process"),
+            pytest.param(
+                f'bash <<< "$(echo {_SHELL_FETCH_B64} | base64 -d)"', id="here_string_sub"
+            ),
+            pytest.param(
+                f'eval "$(echo ZWNobyBoZWxsbwo= | base64 -d; echo {_SHELL_FETCH_B64} | base64 -d)"',
+                id="second_decoder_in_substitution",
+            ),
+            pytest.param(
+                f"echo ZWNobyBoZWxsbw== | base64 -d | echo {_SHELL_FETCH_B64} | base64 -d | sh",
+                id="overlapping_decoded_pipeline",
+            ),
+            pytest.param(
+                f'eval "$(echo {_SHELL_FETCH_B64} | base64 -d | cat)"',
+                id="substitution_with_filter",
+            ),
+            pytest.param(
+                f'eval "$(echo {_SHELL_FETCH_B64} | base64 -d > >(cat))"',
+                id="substitution_with_redirected_filter",
+            ),
+            pytest.param(
+                f'eval "$(echo {_SHELL_FETCH_B64} | base64 -d > payload.sh; cat payload.sh)"',
+                id="substitution_with_file_round_trip",
+            ),
+            pytest.param(
+                f"echo {_SHELL_FETCH_B64} | base64 -d > payload.sh; sh payload.sh",
+                id="saved_then_executed",
+            ),
+            pytest.param(
+                f"echo {_SHELL_FETCH_B64} | base64 -d | tee payload.sh | sha256sum; sh payload.sh",
+                id="saved_before_checksum_then_executed",
+            ),
+            pytest.param(
+                f"echo {_SHELL_FETCH_B64} | base64 -d > payload.sh | sha256sum; sh payload.sh",
+                id="redirected_before_checksum_then_executed",
+            ),
+            pytest.param(
+                f"echo {_SHELL_FETCH_B64} | base64 -d | sha256sum-wrapper",
+                id="unknown_checksum_named_wrapper",
+            ),
+            pytest.param(
+                "eval \"$(echo ZWNobyBoZWxsbwo= | base64 -d; $(printf ''); "
+                f'echo {_SHELL_FETCH_B64} | base64 -d)"',
+                id="second_decoder_after_nested_substitution",
+            ),
         ],
     )
     def test_sc2_shell_literal_decoded_command(self, command: str) -> None:
@@ -2686,6 +3015,16 @@ class TestSupplyChainShellDecoding:
         assert len(decoded) == 1
         assert decoded[0].severity == Severity.HIGH
         assert decoded[0].location.start_line == 2
+
+    @pytest.mark.parametrize("wrapper", ['eval "$(%s)"', "bash <(%s)"])
+    def test_maximum_literal_retains_sc2_in_execution_substitution(self, wrapper: str) -> None:
+        script = (_SHELL_FETCH + "\n#").ljust(12_288)
+        payload = base64.b64encode(script.encode()).decode()
+        assert len(payload) == sc_mod._MAX_SHELL_LITERAL_CHARS
+
+        findings = sc_mod.analyze(wrapper % f"echo {payload} | base64 -d", "setup.sh", "shell")
+
+        assert any(f.rule_id == "SC2" and f.matched_text.startswith(_SHELL_FETCH) for f in findings)
 
     def test_sc3_benign_decoded_payload_is_not_sc2(self) -> None:
         payload = base64.b64encode(b"echo hello").decode()
@@ -2762,6 +3101,12 @@ class TestSupplyChainShellDecoding:
                 {"SC2"},
                 id="newline_ends_stage",
             ),
+            pytest.param(
+                r"a\lias sha256su\m=sh; "
+                f"echo {_SHELL_FETCH_B64} | base64 -d | sha256sum",
+                {"SC2"},
+                id="fragmented_alias",
+            ),
         ],
     )
     def test_shell_decode_in_hook_config(self, command: str, expected: set[str]) -> None:
@@ -2832,6 +3177,10 @@ class TestSupplyChainShellDecoding:
         "content",
         [
             pytest.param("echo QUFB | base64 -d " * 12_000, id="decoders_without_sink"),
+            pytest.param(
+                f"echo {_SHELL_FETCH_B64} | base64 -d | sha256sum\n" * 2_000,
+                id="repeated_checksum_pipelines",
+            ),
             pytest.param("eval $(echo " * 20_000 + "base64 -d", id="unclosed_substitutions"),
             pytest.param("eval $(" + "a " * 128_000 + "base64 -d", id="long_substitution"),
             pytest.param("echo " + "A" * 256_000 + " | base64 -d | sh", id="long_literal"),
