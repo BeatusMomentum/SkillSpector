@@ -117,6 +117,7 @@ def _scan_skill(
     require_llm: bool,
     api_pool=None,
     verbose: bool = False,
+    timeout: float = 90,
 ) -> tuple[dict[str, object], str | None, str]:
     """Scan a single skill through the full pipeline.
 
@@ -140,6 +141,7 @@ def _scan_skill(
         detected_language=lang,
         apply_gap_fill=True,
         api_pool=api_pool,
+        timeout=timeout,
     )
 
     return entry, error_msg, rel_name
@@ -213,6 +215,7 @@ def _scan_skill_bounded(
     **options,
 ) -> tuple[dict[str, object], str | None, str]:
     """Enforce the wall-clock limit on actual work, including local analysis."""
+    options["timeout"] = timeout
     owner = uuid4().hex
     if api_pool is not None:
         options["api_pool"] = SimpleNamespace(
