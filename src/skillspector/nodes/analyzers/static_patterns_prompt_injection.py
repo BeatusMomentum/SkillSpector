@@ -362,6 +362,10 @@ def _reference_comment_matches(
             end += 1
         title = _REFERENCE_COMMENT_TITLE.match(content, end) if depth == 0 else None
         if title is None:
+            if depth == 0 and _REFERENCE_COMMENT_KEYWORD.search(content, destination_start, end):
+                match = _REFERENCE_COMMENT_SPAN.match(content, opening.start(), end)
+                assert match is not None
+                yield match
             cursor = max(end, opening.end())
             continue
         title_start = title.end()

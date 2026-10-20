@@ -129,6 +129,15 @@ def test_hidden_destination_keywords_are_not_lost(destination: str) -> None:
     assert _p2(comment)[0].matched_text == comment
 
 
+@pytest.mark.parametrize("destination", ["#(GET)", "#(instructions)", "#transmit", "#sendMessage"])
+def test_hidden_destination_keywords_do_not_require_a_title(destination: str) -> None:
+    comment = f"[//]: {destination}"
+    findings = _p2(comment + "\n\nGET a visible page (details).")
+    assert len(findings) == 1
+    assert findings[0].matched_text == comment
+    assert findings[0].match_fingerprint == compute_match_fingerprint("P2", comment)
+
+
 @pytest.mark.parametrize(
     "content",
     [
