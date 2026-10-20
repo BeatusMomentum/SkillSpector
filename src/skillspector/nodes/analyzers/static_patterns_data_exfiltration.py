@@ -29,6 +29,8 @@ from skillspector.state import AnalyzerNodeResponse, SkillspectorState
 
 from . import static_runner
 from .common import (
+    MARKDOWN_FENCE_CLOSE,
+    MARKDOWN_FENCE_OPEN,
     apply_import_aliases,
     get_context,
     get_context_from_lines,
@@ -44,14 +46,18 @@ logger = get_logger(__name__)
 ANALYZER_ID = "static_patterns_data_exfiltration"
 USES_PYTHON_AST = True
 
+_E1_CURL_UPLOAD_PATTERN = (r"curl\s+[^|]*(?:-d|--data|--data-raw|--data-binary)\s+", 0.6)
+_E1_WGET_UPLOAD_PATTERN = (r"wget\s+[^|]*--post-(?:data|file)", 0.6)
+_E1_SHELL_PATTERNS = frozenset({_E1_CURL_UPLOAD_PATTERN, _E1_WGET_UPLOAD_PATTERN})
+
 E1_CODE_PATTERNS = [
     (r"requests\s*\.\s*(?:post|put)\s*\(\s*['\"]https?://", 0.6),
     (r"requests\s*\.\s*(?:post|put)\s*\([^)]*json\s*=", 0.7),
     (r"httpx\s*\.\s*(?:post|put)\s*\(\s*['\"]https?://", 0.6),
     (r"urllib\s*\.\s*request\s*\.\s*urlopen\s*\([^)]*data\s*=", 0.6),
     (r"fetch\s*\(\s*['\"]https?://[^'\"]+['\"][^)]*method\s*:\s*['\"]POST['\"]", 0.6),
-    (r"curl\s+[^|]*(?:-d|--data|--data-raw|--data-binary)\s+", 0.6),
-    (r"wget\s+[^|]*--post-(?:data|file)", 0.6),
+    _E1_CURL_UPLOAD_PATTERN,
+    _E1_WGET_UPLOAD_PATTERN,
     (r"https?://(?:api\.|data\.|collect\.|telemetry\.|analytics\.)[\w.-]+/", 0.5),
 ]
 E1_PROSE_PATTERNS = [
@@ -61,7 +67,6 @@ E1_PROSE_PATTERNS = [
     ),
 ]
 E1_PATTERNS = E1_CODE_PATTERNS + E1_PROSE_PATTERNS
-_E1_SHELL_PATTERNS = frozenset(E1_CODE_PATTERNS[5:7])
 _E1_FETCH_COMMAND = re.compile(r"(?:curl|wget)(?=\s)", re.IGNORECASE)
 _E1_UNPROVED_SHELL_SPACE = re.compile(r"(?!\r\n)[^\S \t\n]")
 _E1_UNPROVED_SHELL_SYNTAX = re.compile(r"(?<!\S)--%(?=\s|$)|[{}]|<#")
@@ -158,7 +163,52 @@ E5_PATTERNS = [
 ]
 
 
-def _e1_shell_command_ranges(content: str) -> tuple[tuple[int, int | None], ...]:
+def _e1_shell_regions(content: str, file_type: str) -> tuple[tuple[int, int], ...]:
+    """Identify source regions whose physical separators have shell semantics.
+
+    Host-language strings, YAML folded scalars and Markdown soft wraps can join
+    physical lines. Their existing conservative matcher must remain in charge.
+    Only top-level, explicitly labelled shell fences provide Markdown proof;
+    nested/list/quoted or unknown-language fences retain the fallback.
+    """
+    if file_type == "shell":
+        return ((0, len(content)),)
+    if file_type != "markdown":
+        return ()
+    shell_languages = {"sh", "bash", "shell", "dash", "zsh", "ksh", "console"}
+    regions: list[tuple[int, int]] = []
+    active: tuple[str, int, int, bool] | None = None
+    frontmatter = content.lstrip("\ufeff").startswith(("---\n", "---\r"))
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        physical_line = line.rstrip("\r\n")
+        if frontmatter:
+            if offset and physical_line in {"---", "..."}:
+                frontmatter = False
+        elif active is None:
+            opening = MARKDOWN_FENCE_OPEN.fullmatch(physical_line)
+            if opening is not None:
+                marker = opening[1]
+                info = physical_line[opening.end(1) :].strip().split()
+                active = (
+                    marker[0],
+                    len(marker),
+                    offset + len(line),
+                    bool(info) and info[0].lower() in shell_languages,
+                )
+        else:
+            closing = MARKDOWN_FENCE_CLOSE.fullmatch(physical_line)
+            if closing is not None and closing[1][0] == active[0] and len(closing[1]) >= active[1]:
+                if active[3]:
+                    regions.append((active[2], offset))
+                active = None
+        offset += len(line)
+    if active is not None and active[3]:
+        regions.append((active[2], len(content)))
+    return tuple(regions)
+
+
+def _e1_shell_command_ranges(content: str, file_type: str) -> tuple[tuple[int, int | None], ...]:
     """Locate proved command boundaries without changing source evidence.
 
     Upload flags belong to the curl/wget invocation, not a later command or
@@ -168,6 +218,8 @@ def _e1_shell_command_ranges(content: str) -> tuple[tuple[int, int | None], ...]
     """
     ranges: list[tuple[int, int | None]] = []
     previous_end = 0
+    regions = _e1_shell_regions(content, file_type)
+    region_index = 0
     for fetch in _E1_FETCH_COMMAND.finditer(content):
         if fetch.start() < previous_end:
             # An embedded fetch may be an argument or a real nested invocation.
@@ -175,9 +227,25 @@ def _e1_shell_command_ranges(content: str) -> tuple[tuple[int, int | None], ...]
             # quadratically when a command contains many curl/wget words.
             ranges.append((fetch.start(), None))
             break
-        _, end, limited = _bounded_shell_tokens(content, fetch.start(), fetch.end())
+        while region_index < len(regions) and regions[region_index][1] <= fetch.start():
+            region_index += 1
+        if region_index == len(regions) or fetch.start() < regions[region_index][0]:
+            ranges.append((fetch.start(), None))
+            break
+        try:
+            _, end, limited = _bounded_shell_tokens(content, fetch.start(), fetch.end())
+        except (TypeError, ValueError):
+            # The shared security-view decoder can reject unusual ANSI-C
+            # escapes. Keep E1/E2 evidence rather than failing the analyzer.
+            # Deadline and budget exceptions deliberately propagate.
+            ranges.append((fetch.start(), None))
+            break
         if (
             limited
+            or end > regions[region_index][1]
+            # A ')' in a nested heredoc body can fool the substitution skipper.
+            # No separator after that point is a proved shell command end.
+            or "<<" in content[fetch.start() : end]
             # Wrappers and PowerShell expressions can assemble more arguments;
             # semicolons and hashes can be literal arguments in CMD commands.
             or content[end : end + 1] in {"'", '"', "`", "(", ")", ";", "#"}
@@ -365,7 +433,7 @@ def analyze(
 
     tag = [PatternCategory.DATA_EXFILTRATION.value]
 
-    shell_command_ranges = _e1_shell_command_ranges(content)
+    shell_command_ranges = _e1_shell_command_ranges(content, file_type)
     for pattern, confidence in E1_PATTERNS:
         if (pattern, confidence) in _E1_SHELL_PATTERNS:
             e1_matches = _iter_e1_shell_matches(pattern, content, shell_command_ranges)

