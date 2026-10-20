@@ -86,30 +86,38 @@ _ZERO_WIDTH_PATTERN = "[" + "".join(sorted(ZERO_WIDTH_CHARS)) + "]"
 # paired controls can, which is the same line GCC's -Wbidi-chars draws by
 # default. Do not add them here without revisiting that tradeoff.
 _BIDI_CONTROL_PATTERN = r"[\u202a-\u202e\u2066-\u2069]"
+# Treat separators, lower-to-upper transitions, and acronym-to-PascalCase transitions as
+# identifier boundaries without matching keyword prefixes in ordinary alphanumeric words.
+_P2_IDENTIFIER_START = (
+    r"(?:(?<![^\W_])|(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z]))|(?<=(?-i:[A-Z]))(?=(?-i:[A-Z][a-z])))"
+)
+_P2_IDENTIFIER_END = (
+    r"(?:(?![^\W_])|(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z]))|(?<=(?-i:[A-Z]))(?=(?-i:[A-Z][a-z])))"
+)
+# Keywords that are rarely part of ordinary words also match inside run-together
+# text such as PLEASEIGNOREPREVIOUSINSTRUCTIONS, which has no separator or case
+# transition to split on. Keywords that commonly start ordinary words (SYSTEMATIC,
+# POSTGRES, GETTING, target, sending) keep identifier boundaries.
+_P2_COMMENT_KEYWORD = (
+    rf"(?:{_P2_IDENTIFIER_START}(?:system|POST|GET|send){_P2_IDENTIFIER_END}"
+    r"|ignore|instructions?|transmit)"
+)
 # Reference-comment titles need a source delimiter scan, rather than a DOTALL
 # keyword expression that can backtrack past an already closed title.
 _REFERENCE_COMMENT_GAP = r"[ \t]*(?:(?:\r\n|\r|\n)[ \t]*)?"
-_REFERENCE_COMMENT_PATTERN = rf"\[//\]:{_REFERENCE_COMMENT_GAP}#{_REFERENCE_COMMENT_GAP}\("
+_REFERENCE_COMMENT_PATTERN = rf"\[//\]:{_REFERENCE_COMMENT_GAP}#"
 _REFERENCE_COMMENT_OPENING = re.compile(_REFERENCE_COMMENT_PATTERN)
+_REFERENCE_COMMENT_TITLE = re.compile(r"(?:[ \t]+|[ \t]*(?:\r\n|\r|\n)[ \t]*)\(")
 _REFERENCE_COMMENT_SPAN = re.compile(r"[\s\S]*")
-# Preserve separator/snake_case, camelCase and acronym-to-PascalCase signals
-# without treating ordinary words such as "target" or "POSTGRES" as commands.
-_REFERENCE_KEYWORD_BOUNDARY = (
-    r"(?:(?<![^\W_])|(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z]))"
-    r"|(?<=(?-i:[A-Z]))(?=(?-i:[A-Z][a-z])))"
-)
-_REFERENCE_KEYWORD_END = (
-    r"(?:(?![^\W_])|(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z]))"
-    r"|(?<=(?-i:[A-Z]))(?=(?-i:[A-Z][a-z])))"
-)
-_REFERENCE_COMMENT_KEYWORD = re.compile(
-    _REFERENCE_KEYWORD_BOUNDARY
-    + r"(?:system|instructions?|ignore|POST|GET|send|transmit)"
-    + _REFERENCE_KEYWORD_END,
-    re.IGNORECASE,
-)
+_REFERENCE_COMMENT_KEYWORD = re.compile(_P2_COMMENT_KEYWORD, re.IGNORECASE)
 P2_PATTERNS = [
-    (r"<!--.*?(?:system|instructions?|ignore|POST|GET|send|transmit).*?-->", 0.7),
+    (
+        # "<!-->" and "<!--->" are abrupt empty comments: the HTML tokenizer
+        # closes them immediately, so the text after them is visible. Never
+        # start a hidden-comment match there.
+        rf"<!--(?!-?>)(?:(?!--!?>).)*?{_P2_COMMENT_KEYWORD}(?:(?!--!?>).)*?--!?>",
+        0.7,
+    ),
     (_REFERENCE_COMMENT_PATTERN, 0.8),
     (_ZERO_WIDTH_PATTERN, 0.6),
     (r"data:text/plain;base64,[A-Za-z0-9+/=]{50,}", 0.7),
@@ -317,12 +325,12 @@ def _reference_comment_matches(
     content: str,
     check_runtime: Callable[[], None] | None = None,
 ) -> Iterator[re.Match[str]]:
-    """Own a title up to its first unescaped source closer or a blank line.
+    """Own the destination and its separated, parenthesized title.
 
-    CommonMark parenthesized titles allow escaped parentheses and line breaks,
-    but no blank lines. Do not exempt malformed nested or blank-line titles
-    wholesale: an existing keyword in the owned prefix remains conservative
-    evidence. Later visible paragraphs cannot supply that keyword.
+    CommonMark destinations can contain balanced parentheses, while titles
+    require intervening whitespace. Titles allow escapes and line breaks but
+    no blank lines. A keyword already inside an unfinished or malformed title
+    remains conservative evidence; later visible paragraphs cannot supply it.
     """
     cursor = 0
     while cursor < len(content):
@@ -331,10 +339,34 @@ def _reference_comment_matches(
         opening = _REFERENCE_COMMENT_OPENING.search(content, cursor)
         if opening is None:
             return
-        title_start = opening.end()
+        destination_start = opening.end() - 1
+        end = opening.end()
+        depth = 0
+        next_runtime_check = end
+        while end < len(content):
+            if check_runtime is not None and end >= next_runtime_check:
+                check_runtime()
+                next_runtime_check = end + 1024
+            char = content[end]
+            if char in " \t\r\n" or ord(char) < 32 or ord(char) == 127:
+                break
+            if char == "\\" and end + 1 < len(content) and content[end + 1] in "\\()":
+                end += 2
+                continue
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            end += 1
+        title = _REFERENCE_COMMENT_TITLE.match(content, end) if depth == 0 else None
+        if title is None:
+            cursor = max(end, opening.end())
+            continue
+        title_start = title.end()
         end = title_start
         closed = False
-        blank_line = False
         line_has_text = True
         next_runtime_check = title_start
         while end < len(content):
@@ -352,7 +384,6 @@ def _reference_comment_matches(
                 break
             if char in "\r\n":
                 if not line_has_text:
-                    blank_line = True
                     break
                 line_has_text = False
                 if char == "\r" and end + 1 < len(content) and content[end + 1] == "\n":
@@ -362,8 +393,8 @@ def _reference_comment_matches(
             end += 1
         if check_runtime is not None:
             check_runtime()
-        if (closed or blank_line) and _REFERENCE_COMMENT_KEYWORD.search(
-            content, title_start, end - 1 if closed else end
+        if _REFERENCE_COMMENT_KEYWORD.search(
+            content, destination_start, end - 1 if closed else end
         ):
             match = _REFERENCE_COMMENT_SPAN.match(content, opening.start(), end)
             assert match is not None
