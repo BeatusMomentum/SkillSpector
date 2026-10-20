@@ -177,8 +177,9 @@ def _e1_shell_regions(content: str, file_type: str) -> tuple[tuple[int, int], ..
         return ()
     # CommonMark HTML blocks can contain shell-looking fences as literal text.
     # Without parsing HTML block ownership, conservatively retain legacy
-    # matching throughout documents with a possible block opener or closer.
-    if re.search(r"(?:\A|[\r\n])\ufeff*[ ]{0,3}<(?:[/!?]|[A-Za-z])", content) is not None:
+    # matching throughout documents with a possible opener or closer, including
+    # markers nested in list/quote containers or following other inline text.
+    if re.search(r"<(?:[/!?]|[A-Za-z])", content) is not None:
         return ()
     shell_languages = {"sh", "bash", "shell", "dash", "zsh", "ksh", "console"}
     regions: list[tuple[int, int]] = []
