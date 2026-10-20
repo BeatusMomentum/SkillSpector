@@ -168,19 +168,25 @@ def _e1_shell_regions(content: str, file_type: str) -> tuple[tuple[int, int], ..
 
     Host-language strings, YAML folded scalars and Markdown soft wraps can join
     physical lines. Their existing conservative matcher must remain in charge.
-    Only top-level, explicitly labelled shell fences provide Markdown proof;
-    nested/list/quoted or unknown-language fences retain the fallback.
+    Explicit shell fences with the shared 0-3 space marker grammar can provide
+    Markdown proof. Unknown languages and uncertain host contexts cannot.
     """
     if file_type == "shell":
         return ((0, len(content)),)
     if file_type != "markdown":
+        return ()
+    # CommonMark HTML blocks can contain shell-looking fences as literal text.
+    # Without parsing HTML block ownership, conservatively retain legacy
+    # matching throughout documents with a possible block opener or closer.
+    if re.search(r"(?:\A|[\r\n])\ufeff*[ ]{0,3}<(?:[/!?]|[A-Za-z])", content) is not None:
         return ()
     shell_languages = {"sh", "bash", "shell", "dash", "zsh", "ksh", "console"}
     regions: list[tuple[int, int]] = []
     active: tuple[str, int, int, bool] | None = None
     frontmatter = content.lstrip("\ufeff").startswith(("---\n", "---\r"))
     offset = 0
-    for line in content.splitlines(keepends=True):
+    for physical in re.finditer(r"[^\r\n]*(?:\r\n|\r|\n|$)", content):
+        line = physical[0]
         physical_line = line.rstrip("\r\n")
         if frontmatter:
             if offset and physical_line in {"---", "..."}:
