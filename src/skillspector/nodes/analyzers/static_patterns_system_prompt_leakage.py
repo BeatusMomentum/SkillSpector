@@ -733,11 +733,15 @@ class _PreparedAnalysis:
         return retained_suffix
 
     def target_is_identifier_prefix(self, match: re.Match[str], view: SecurityTextView) -> bool:
-        """A target noun must end before an identifier continuation."""
+        """Unqualified target nouns must end before an identifier continuation."""
+        # Qualified English requests are instruction-bearing even in comments,
+        # docstrings and strings. They cannot be the single identifier token
+        # (such as ``return PROMPT_INJECTION_PATTERNS``) this check excludes.
+        if _P6_QUALIFIED_TARGET.search(match.group(0)) is not None:
+            return False
         end = match.end()
         source_last = view.source_offset(end - 1)
         source_suffix = source_last + 1
-        qualified = _P6_QUALIFIED_TARGET.search(match.group(0)) is not None
         # NFKC can introduce a space inside an ECMA identifier character or
         # remove an XID mark entirely. That projected separator is not a token
         # boundary. Marker removal is separate: the continuation must survive
@@ -746,11 +750,6 @@ class _PreparedAnalysis:
         if source_suffix < len(self.source):
             character = self.source[source_suffix]
             if not character.isascii() and _is_identifier_continuation(character):
-                separator_request = (
-                    is_default_ignorable(character)
-                    and qualified
-                    and view.name.startswith(("ignorable-separator-continuity", "declared-marker"))
-                )
                 marker_suffix = (
                     self._declared_marker_suffix(source_last)
                     if view.name.startswith("declared-marker")
@@ -759,29 +758,6 @@ class _PreparedAnalysis:
                 removed_marker = marker_suffix is not None and marker_suffix[0]
                 origin = normalized_security_view(self.source[source_last]).text
                 if origin.casefold().endswith(view.text[end - 1].casefold()) and not removed_marker:
-                    if separator_request:
-                        suffix = end
-                        while suffix < len(view.text) and is_default_ignorable(view.text[suffix]):
-                            if (suffix - end) % 4096 == 0:
-                                self.check_runtime()
-                            suffix += 1
-                        if suffix < len(view.text):
-                            character = view.text[suffix]
-                            if character == "$" or unicodedata.category(character) in {
-                                "Mn",
-                                "Mc",
-                                "Pc",
-                            }:
-                                return True
-                        character = (
-                            marker_suffix[1]
-                            if marker_suffix is not None
-                            else self._source_suffix_character(source_suffix)
-                        )
-                        return bool(character) and (
-                            character == "$"
-                            or unicodedata.category(character) in {"Mn", "Mc", "Pc"}
-                        )
                     return True
         if end < len(view.text):
             if _is_identifier_continuation(view.text[end]):
@@ -799,7 +775,7 @@ class _PreparedAnalysis:
             if view.name.startswith("ignorable-separator-continuity"):
                 source_suffix = view.source_offset(end)
                 if is_default_ignorable(self.source[source_suffix]):
-                    if not qualified and _is_identifier_continuation(self.source[source_suffix]):
+                    if _is_identifier_continuation(self.source[source_suffix]):
                         return True
                     character = self._source_suffix_character(source_suffix)
                     return bool(character) and (
@@ -812,6 +788,13 @@ class _PreparedAnalysis:
         boundary_view = getattr(view, "derived_view", view)
         if not boundary_view.right_boundary_is_fixed:
             return False
+        # A reconstruction limit can mark a complete payload as fixed too.
+        # Its next source character can belong to an omitted marker, in either
+        # ASCII or Unicode. Use the retained payload suffix in that case.
+        if view.name.startswith("declared-marker"):
+            marker_suffix = self._declared_marker_suffix(source_last)
+            if marker_suffix is not None and marker_suffix[0]:
+                return _is_identifier_continuation(marker_suffix[1])
         projected = normalized_security_view(self.source[source_last]).text
         run_start = end - 1
         while (
