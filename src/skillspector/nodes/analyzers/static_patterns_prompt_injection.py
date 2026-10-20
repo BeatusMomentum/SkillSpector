@@ -360,9 +360,12 @@ def _reference_comment_matches(
                     break
                 depth -= 1
             end += 1
-        title = _REFERENCE_COMMENT_TITLE.match(content, end) if depth == 0 else None
+        destination_valid = depth == 0 and (end == len(content) or content[end] in " \t\r\n")
+        title = _REFERENCE_COMMENT_TITLE.match(content, end) if destination_valid else None
         if title is None:
-            if depth == 0 and _REFERENCE_COMMENT_KEYWORD.search(content, destination_start, end):
+            if destination_valid and _REFERENCE_COMMENT_KEYWORD.search(
+                content, destination_start, end
+            ):
                 match = _REFERENCE_COMMENT_SPAN.match(content, opening.start(), end)
                 assert match is not None
                 yield match

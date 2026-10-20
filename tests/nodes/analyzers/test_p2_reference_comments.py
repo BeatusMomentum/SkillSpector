@@ -148,6 +148,10 @@ def test_hidden_destination_keywords_do_not_require_a_title(destination: str) ->
         "[//]: #(unclosed (GET visible text)",
         "[//]: #() (layout note)\n\nGET visible text (details).",
         "[//]: #(x) (layout note\n\nGET visible text (details).",
+        "[//]: #transmit) (layout note)",
+        "[//]: #GET) visible text",
+        "[//]: #transmit(unclosed",
+        "[//]: #GET\x01 (layout note)",
     ],
 )
 def test_destination_requires_a_separate_title_and_cannot_borrow(content: str) -> None:
